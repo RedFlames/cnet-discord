@@ -6,8 +6,11 @@ import random
 import os
 import dotenv
 import asyncio
+#import websocket
 import websockets
 import json
+import requests
+import traceback
 
 dotenv.load_dotenv()
 
@@ -25,7 +28,11 @@ bot = commands.Bot(command_prefix='?', description=description, intents=intents)
 async def on_ready():
 	print(f'Logged in as {bot.user} (ID: {bot.user.id})')
 	print('------')
-	await webhooker(bot) #bot.add_cog(Celestenet(bot))
+	try:
+		await webhooker(bot) #bot.add_cog(Celestenet(bot))
+	except Exception as e:
+		print (f"websocketeer died")
+		traceback.print_exception(e)
 
 
 @bot.command()
@@ -84,10 +91,36 @@ async def webhooker(client):
 	uri = 'wss://celestenet.0x0a.de/api/ws'
 	ori='https://celestenet.0x0a.de'
 	print({"Cookie": os.getenv("CNET_COOKIE")})
+	cookies = json.loads(os.getenv("CNET_COOKIE"))
+	
 	await client.wait_until_ready()
 	channel = await client.fetch_channel(158222673850269696)
 	print("Client ready.")
-	async for ws in websockets.connect(uri, origin=ori, extra_headers={"Cookie": os.getenv("CNET_COOKIE")}):
+	
+	rd = None
+	authkey = None
+	r = requests.post("https://celestenet.0x0a.de/api/auth", '""', cookies=cookies)
+	if r.status_code != 200:
+		print("Failed api/auth")
+	else:
+		try:
+			rd = r.json()
+		except JSONDecodeError:
+			print(f"Error decoding reauth: {r.text}")
+		
+		if isinstance(rd, dict) and 'Key' in rd:
+			authkey = rd['Key']
+		else:
+			print(f"Key not in reauth: {rd}")
+		print(f"Auth'd to {authkey}")
+	
+	async for ws in websockets.connect(uri, origin=ori):
+		if authkey:
+			await asyncio.sleep(1)
+			await ws.send("cmd")
+			await ws.send("reauth")
+			await ws.send(json.dumps(authkey))
+		
 		while True:
 			message = ""
 			try:
@@ -100,17 +133,19 @@ async def webhooker(client):
 						try:
 							message = json.loads(ws_msg)
 							break
-						except JsonDecodeError:
+						except JSONDecodeError:
 							print(f"Error decoding chat: {ws_msg}")
 			except websockets.ConnectionClosed:
 				print("websocket died.")
 				break
 			print(message)
-			em = discord.Embed(title=message['PlayerID'])
-			em.add_field(name="Chat:", value=message['Text'], inline=True)
-			print(em)
-			await channel.send(embed=em)
+			if isinstance(message, dict):
+				em = discord.Embed(title=message['PlayerID'])
+				em.add_field(name="Chat:", value=message['Text'], inline=True)
+				print(em)
+				await channel.send(embed=em)
 		print("We died.")
+		
 
 
 async def main():
