@@ -20,7 +20,8 @@
               "containerPort": 5678,
               "hostPort": 5678
             }
-          ]
+          ],
+          "remove": true
         }
         //"python": {
         //  "file": "./bot.py"
