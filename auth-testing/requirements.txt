@@ -1,4 +1,5 @@
 python-dotenv
 websockets
+#Authlib
 requests
-ptvsd
+#discord-oauth2

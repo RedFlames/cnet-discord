@@ -1,39 +1,71 @@
 # This example requires the 'members' and 'message_content' privileged intents to function.
 
-import discord
-from discord.ext import commands
-import random
+
 import os
-import dotenv
+import random
 import asyncio
-#import websocket
-import websockets
 import json
-import requests
 import traceback
 
+import discord
+from discord.ext import commands, tasks
+import dotenv
+import requests
+import websockets
+
+from celestenet import Celestenet
+
+# --- ptvsd used for VSCode debugger ---
+import ptvsd
+ptvsd.enable_attach(address=('0.0.0.0', 5678))
+
+# --- .env file contains bot token, cnet cookies, etc. ---
 dotenv.load_dotenv()
 
-description = '''An example bot to showcase the discord.ext.commands extension
-module.
-There are a number of utility commands being showcased here.'''
+description = '''
+Bot description goes here lol.'''
 
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
-bot = commands.Bot(command_prefix='?', description=description, intents=intents)
+bot = commands.Bot(command_prefix='!', description=description, intents=intents)
+celery = Celestenet()
+celery_channel = None
+celery_task = None
 
 @bot.event
 async def on_ready():
 	print(f'Logged in as {bot.user} (ID: {bot.user.id})')
 	print('------')
 	try:
-		await webhooker(bot) #bot.add_cog(Celestenet(bot))
+		celery_channel = await channel_setup(os.getenv("CHANNEL"))
+		celery.init_client(bot, os.getenv("CNET_COOKIE"), celery_channel)
+		celery.create_task()
+		print("Starting task loop...")
+		task_loop_check.start()
 	except Exception as e:
-		print (f"websocketeer died")
+		print (f"socket_relay died")
 		traceback.print_exception(e)
 
+async def channel_setup(name):
+	channel_found = None
+	for channel in bot.get_all_channels():
+		if channel.name == name:
+			channel_found = channel
+			break
+	if channel_found != None:
+		await channel_found.send(f"Celestenet bot configured to use this channel.")
+	else:
+		print(f"Channel {name} not found!")
+	return channel_found
+
+@tasks.loop(seconds=2)
+async def task_loop_check():
+	if celery.get_task() is ct == None:
+		celery_channel.send("Celery task ended, restarting...")
+		celery.create_task()
+	print(ct)
 
 @bot.command()
 async def add(ctx, left: int, right: int):
@@ -87,72 +119,8 @@ async def _bot(ctx):
 	"""Is the bot cool?"""
 	await ctx.send('Yes, the bot is cool.')
 
-async def webhooker(client):
-	uri = 'wss://celestenet.0x0a.de/api/ws'
-	ori='https://celestenet.0x0a.de'
-	print({"Cookie": os.getenv("CNET_COOKIE")})
-	cookies = json.loads(os.getenv("CNET_COOKIE"))
-	
-	await client.wait_until_ready()
-	channel = await client.fetch_channel(158222673850269696)
-	print("Client ready.")
-	
-	rd = None
-	authkey = None
-	r = requests.post("https://celestenet.0x0a.de/api/auth", '""', cookies=cookies)
-	if r.status_code != 200:
-		print("Failed api/auth")
-	else:
-		try:
-			rd = r.json()
-		except JSONDecodeError:
-			print(f"Error decoding reauth: {r.text}")
-		
-		if isinstance(rd, dict) and 'Key' in rd:
-			authkey = rd['Key']
-		else:
-			print(f"Key not in reauth: {rd}")
-		print(f"Auth'd to {authkey}")
-	
-	async for ws in websockets.connect(uri, origin=ori):
-		if authkey:
-			await asyncio.sleep(1)
-			await ws.send("cmd")
-			await ws.send("reauth")
-			await ws.send(json.dumps(authkey))
-		
-		while True:
-			message = ""
-			try:
-				while True:
-					ws_cmd = await ws.recv()
-					print(f"ws_cmd: {ws_cmd}")
-					if ws_cmd == "chat":
-						ws_msg = await ws.recv()
-						print(f"ws_msg: {ws_msg}")
-						try:
-							message = json.loads(ws_msg)
-							break
-						except JSONDecodeError:
-							print(f"Error decoding chat: {ws_msg}")
-			except websockets.ConnectionClosed:
-				print("websocket died.")
-				break
-			print(message)
-			if isinstance(message, dict):
-				em = discord.Embed(title=message['PlayerID'])
-				em.add_field(name="Chat:", value=message['Text'], inline=True)
-				print(em)
-				await channel.send(embed=em)
-		print("We died.")
-		
-
-
 async def main():
 	async with bot:
-		#input_coroutines = [bot.start(os.getenv("BOT_TOKEN"))]
-		#await bot.load_extension('celestenet')
-		#return await asyncio.gather(*input_coroutines, return_exceptions=True)
 		await bot.start(os.getenv("BOT_TOKEN"))
 
 

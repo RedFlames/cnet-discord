@@ -7,8 +7,5 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
-RUN useradd appuser && chown -R appuser /app
-USER appuser
-
-#CMD ["bash"]
-CMD ["python", "bot.py"]
+CMD ["bash"]
+#CMD ["python", "bot.py"]

@@ -1,0 +1,39 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "type": "docker-run",
+        "label": "docker-run: debug",
+        "dependsOn": ["docker-build"],
+        "dockerRun": {
+          "containerName": "cnet-discord",
+          "image": "cnet-discord:latest",
+          "env": {},
+          "volumes": [
+            {
+              "containerPath": "/app",
+              "localPath": "${workspaceFolder}"
+            }
+          ],
+          "ports": [
+            {
+              "containerPort": 5678,
+              "hostPort": 5678
+            }
+          ]
+        }
+        //"python": {
+        //  "file": "./bot.py"
+        //}
+      },
+      {
+        "label": "docker-build",
+        "type": "docker-build",
+        "dockerBuild": {
+            "context": "${workspaceFolder}",
+            "dockerfile": "${workspaceFolder}/Dockerfile",
+            "tag": "cnet-discord:latest"
+        }
+      }
+    ]
+  }
