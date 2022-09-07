@@ -41,9 +41,7 @@ async def on_ready():
     try:
         celery_channel = await channel_setup(os.getenv("CHANNEL"))
         celery.init_client(bot, os.getenv("CNET_COOKIE"), celery_channel)
-        celery.create_task()
-        print("Starting task loop...")
-        task_loop_check.start()
+        celery.check_tasks()
     except Exception as e:
         print (f"socket_relay died")
         traceback.print_exception(e)
@@ -60,12 +58,10 @@ async def channel_setup(name):
         print(f"Channel {name} not found!")
     return channel_found
 
-@tasks.loop(seconds=2)
+@tasks.loop(seconds=3)
 async def task_loop_check():
-    if celery.get_task() is ct == None:
-        celery_channel.send("Celery task ended, restarting...")
-        celery.create_task()
-    print(ct)
+    print(f"Checking tasks...")
+    celery.check_tasks()
 
 async def main():
     async with bot:

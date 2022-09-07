@@ -28,6 +28,33 @@
         //}
       },
       {
+        "type": "docker-run",
+        "label": "docker-run: shell",
+        "dependsOn": ["docker-build"],
+        "dockerRun": {
+          "containerName": "cnet-discord-shell",
+          "image": "cnet-discord:latest",
+          "env": {},
+          "volumes": [
+            {
+              "containerPath": "/app",
+              "localPath": "${workspaceFolder}"
+            }
+          ],
+          "ports": [
+            {
+              "containerPort": 5678,
+              "hostPort": 5678
+            }
+          ],
+          "remove": true,
+          "command": "tail -f /dev/null"
+        }
+        //"python": {
+        //  "file": "./bot.py"
+        //}
+      },
+      {
         "label": "docker-build",
         "type": "docker-build",
         "dockerBuild": {
