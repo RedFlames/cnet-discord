@@ -1,17 +1,12 @@
 # This example requires the 'members' and 'message_content' privileged intents to function.
 
-
 import os
-import random
 import asyncio
-import json
 import traceback
 
 import discord
 from discord.ext import commands, tasks
 import dotenv
-import requests
-import websockets
 
 from celestenet import Celestenet
 
@@ -25,26 +20,23 @@ dotenv.load_dotenv()
 description = '''
 Bot description goes here lol.'''
 
-intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
-
+intents=discord.Intents(guilds=True, members=True, message_content=True)
 bot = commands.Bot(command_prefix='!', description=description, intents=intents)
 celery = Celestenet()
 celery_channel = None
-celery_task = None
 
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user} (ID: {bot.user.id})')
     print('------')
     try:
+        global celery_channel
         celery_channel = await channel_setup(os.getenv("CHANNEL"))
-        celery.init_client(bot, os.getenv("CNET_COOKIE"), celery_channel)
+        celery.init_client(bot, None, celery_channel) # os.getenv("CNET_COOKIE")
         celery.check_tasks()
-    except Exception as e:
-        print (f"socket_relay died")
-        traceback.print_exception(e)
+    except Exception as catch_all:
+        print ("socket_relay died")
+        traceback.print_exception(catch_all)
 
 async def channel_setup(name):
     channel_found = None
@@ -52,15 +44,15 @@ async def channel_setup(name):
         if channel.name == name:
             channel_found = channel
             break
-    if channel_found != None:
-        await channel_found.send(f"Celestenet bot configured to use this channel.")
+    if channel_found is not None:
+        await channel_found.send("Celestenet bot configured to use this channel.")
     else:
         print(f"Channel {name} not found!")
     return channel_found
 
 @tasks.loop(seconds=3)
 async def task_loop_check():
-    print(f"Checking tasks...")
+    print("Checking tasks...")
     celery.check_tasks()
 
 async def main():

@@ -10,7 +10,6 @@ from discord.ext import commands, tasks
 import websockets
 import os
 import asyncio
-import websockets
 import json
 import requests
 
@@ -27,11 +26,11 @@ class Player:
         self.image = pd.get('Avatar', self.image)
 
 class Channel:
-    def __init__(self, ID=0, name='', players = [], private=False):
+    def __init__(self, ID=0, name='', players = None, private=False):
         self.ID = ID
         self.name = name
         self.private = private
-        self.players = players
+        self.players = [] if players is None else players
 
     def dict_update(self, pd: dict):
         self.ID = pd.get('ID', self.ID) 
@@ -104,7 +103,7 @@ class Celestenet:
         try:
             return await awaitable
         except Exception as e:
-            print (f"socket_relay died")
+            print ("socket_relay died")
             traceback.print_exception(e)
 
     def get_task(self, name):
@@ -134,10 +133,10 @@ class Celestenet:
         return ChatRegexGroup(match.groupdict())
 
     def get_channel_by_name(self, name):
-            return next(filter(lambda c: c.name == name, self.channels.values()), None)
+        return next(filter(lambda c: c.name == name, self.channels.values()), None)
 
     def get_channel_by_id(self, ID):
-            return self.channels.get(ID, None)
+        return self.channels.get(ID, None)
 
     async def get_or_make_thread(self, name):
         c: Channel = self.get_channel_by_name(name)
@@ -152,6 +151,7 @@ class Celestenet:
     async def prune_threads(self):
         await self.channel.send("TODO: implement this :)))")
 
+    @staticmethod
     def command_handler(cmd_fn):
         ws_commands[cmd_fn.__name__] = cmd_fn
     
@@ -159,7 +159,7 @@ class Celestenet:
     async def chat(self, data: str):
         try:
             message = json.loads(data)
-        except json.JSONDecodeError as e:
+        except json.JSONDecodeError:
             error = f"Failed to parse chat payload: {data}"
             print(error)
             await self.channel.send(error)
@@ -304,59 +304,58 @@ class Celestenet:
         self.get_channels()
         
         async for ws in websockets.connect(self.uri, origin=self.origin):
-            if authkey:
-                await ws.send("cmd")
-                await ws.send("reauth")
-                await ws.send(json.dumps(authkey))
+            #if authkey:
+            #    await ws.send("cmd")
+            #    await ws.send("reauth")
+            #    await ws.send(json.dumps(authkey))
             
             while True:
                 try:
-                    while True:
-                        ws_data = await ws.recv()
+                    ws_data = await ws.recv()
 
-                        match self.command_state:
-                            case Celestenet.State.WaitForType:
-                                match ws_data:
-                                    case "cmd":
-                                        self.command_state = Celestenet.State.WaitForCMDID
-                                    case "data":
-                                        self.command_state = Celestenet.State.WaitForData
-                                    case _:
-                                        print(f"Unknown ws 'type': {ws_data}")
-                                        break
-                        
-                            case Celestenet.State.WaitForCMDID:
-                                ws_cmd = None
-                                if ws_data in ws_commands:
-                                    ws_cmd = ws_commands[ws_data]
-                                
-                                if ws_cmd is None:
-                                    print(f"Unknown ws command: {ws_data}")
+                    match self.command_state:
+                        case Celestenet.State.WaitForType:
+                            match ws_data:
+                                case "cmd":
+                                    self.command_state = Celestenet.State.WaitForCMDID
+                                case "data":
+                                    self.command_state = Celestenet.State.WaitForData
+                                case _:
+                                    print(f"Unknown ws 'type': {ws_data}")
                                     break
-                                else:
-                                    self.command_current = ws_cmd
-                                    self.command_state = Celestenet.State.WaitForCMDPayload
+                    
+                        case Celestenet.State.WaitForCMDID:
+                            ws_cmd = None
+                            if ws_data in ws_commands:
+                                ws_cmd = ws_commands[ws_data]
                             
-                            case Celestenet.State.WaitForCMDPayload:
-                                if self.command_current:
-                                    await self.command_current(self, ws_data)
-                                    self.command_state = Celestenet.State.WaitForType
-                                    self.command_current = None
-                                else:
-                                    print(f"Got payload but no current command: {ws_data}")
-                                    self.command_current = None
-                                    break
-
-                            case Celestenet.State.WaitForData:
-                                print(f"Got ws 'data' which isn't properly implemented: {ws_data}")
+                            if ws_cmd is None:
+                                print(f"Unknown ws command: {ws_data}")
+                                break
+                            else:
+                                self.command_current = ws_cmd
+                                self.command_state = Celestenet.State.WaitForCMDPayload
+                        
+                        case Celestenet.State.WaitForCMDPayload:
+                            if self.command_current:
+                                await self.command_current(self, ws_data)
                                 self.command_state = Celestenet.State.WaitForType
                                 self.command_current = None
-
-                            case _:
-                                print(f"Unknown ws state: {self.command_state}")
-                                self.command_state = Celestenet.State.WaitForType
+                            else:
+                                print(f"Got payload but no current command: {ws_data}")
                                 self.command_current = None
-                    # self.prune_threads()
+                                break
+
+                        case Celestenet.State.WaitForData:
+                            print(f"Got ws 'data' which isn't properly implemented: {ws_data}")
+                            self.command_state = Celestenet.State.WaitForType
+                            self.command_current = None
+
+                        case _:
+                            print(f"Unknown ws state: {self.command_state}")
+                            self.command_state = Celestenet.State.WaitForType
+                            self.command_current = None
+                    
                 except websockets.ConnectionClosed:
                     print("websocket died.")
                     break
