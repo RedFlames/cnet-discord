@@ -22,41 +22,34 @@ Bot description goes here lol.'''
 
 intents=discord.Intents(guilds=True, members=True, message_content=True)
 bot = commands.Bot(command_prefix='!', description=description, intents=intents)
-celery = Celestenet()
-celery_channel = None
+celery: Celestenet = None
 
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user} (ID: {bot.user.id})')
     print('------')
-    try:
-        global celery_channel
-        celery_channel = await channel_setup(os.getenv("CHANNEL"))
-        celery.init_client(bot, None, celery_channel) # os.getenv("CNET_COOKIE")
-        celery.check_tasks()
-    except Exception as catch_all:
-        print ("socket_relay died")
-        traceback.print_exception(catch_all)
 
-async def channel_setup(name):
-    channel_found = None
-    for channel in bot.get_all_channels():
-        if channel.name == name:
-            channel_found = channel
-            break
-    if channel_found is not None:
-        await channel_found.send("Celestenet bot configured to use this channel.")
-    else:
-        print(f"Channel {name} not found!")
-    return channel_found
 
-@tasks.loop(seconds=3)
+@tasks.loop(seconds=10)
 async def task_loop_check():
-    print("Checking tasks...")
-    celery.check_tasks()
+    await bot.wait_until_ready()
+    #print("Checking tasks...")
+    global celery
+    if celery is None:
+        try:
+            celery = Celestenet()
+            await celery.init_client(bot, os.getenv("CNET_COOKIE"), os.getenv("CHANNEL_PREFIX"))
+            celery.check_tasks()
+        except Exception as catch_all:
+            print ("socket_relay died")
+            traceback.print_exception(catch_all)
+    else:
+        celery.check_tasks()
 
 async def main():
     async with bot:
+        #bot.loop.create_task(task_loop_check())
+        task_loop_check.start()
         await bot.start(os.getenv("BOT_TOKEN"))
 
 

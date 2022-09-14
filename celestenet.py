@@ -1,17 +1,17 @@
-from ctypes import ArgumentError
 import datetime
+from zoneinfo import ZoneInfo
 from enum import Enum, auto
 import re
 import time
 import traceback
 from types import coroutine
+from typing import Any
 import discord
-from discord.ext import commands, tasks
 import websockets
-import os
 import asyncio
 import json
 import requests
+from textwrap import dedent
 
 class Player:
     def __init__(self, ID=0, name='', image=None):
@@ -33,17 +33,18 @@ class Channel:
         self.players = [] if players is None else players
 
     def dict_update(self, pd: dict):
-        self.ID = pd.get('ID', self.ID) 
+        self.ID = pd.get('ID', self.ID)
         self.name = pd.get('Name', self.name)
         self.private = pd.get('IsPrivate', self.private)
         self.players = pd.get('Players', self.players)
 
 class ChatRegexGroup:
     def __init__(self, d: dict):
-        self.time = d.get('time', None)
-        self.channel = d.get('channel', None)
-        self.target = d.get('target', None)
-        self.text = d.get('text', None)
+        self.time: str | None = d.get('time', None)
+        self.channel: str | None = d.get('channel', None)
+        self.whisper: str | None = d.get('whisper', None)
+        self.target: str | None = d.get('target', None)
+        self.text: str | None = d.get('text', None)
 
 ws_commands = {}
 
@@ -68,16 +69,28 @@ class Celestenet:
         self.mq: MessageQueue = MessageQueue()
         self.command_state: Celestenet.State = Celestenet.State.WaitForType
         self.command_current = None
+        self.status: dict[str, Any] = {}
+        self.activity: discord.Activity = discord.Activity(
+                        name="Celestenet",
+                        type=discord.ActivityType.watching,
+                        details="Starting...", timestamps={"start": datetime.datetime.now().timestamp})
 
-        self.chat_regex = re.compile(r'(?sm)^\[(?P<time>[0-9:]+)\] (?: ?\[channel (?P<channel>.+)\])? ?(?::celestenet_avatar_[0-9]+_: )?[^ ]+(?: @ (?::celestenet_avatar_[0-9]+_: )?(?P<target>[^:]+))?: ?(?P<text>.*)$')
+        self.chat_regex = re.compile(r'(?sm)^\[(?P<time>[0-9:]+)\] (?: ?\[(?P<whisper>whisper)[^]]*\])? ?(?: ?\[channel (?P<channel>.+)\])? ?(?::celestenet_avatar_[0-9]+_: )?[^ ]+(?: @ (?::celestenet_avatar_[0-9]+_: )?(?P<target>[^:]+))?: ?(?P<text>.*)$')
 
         """ these three get set in init_client(...) below """
         self.client: discord.Client = None
         self.channel: discord.abc.GuildChannel = None
+        self.status_channel: discord.abc.GuildChannel = None
+        self.status_role = None
+        self.last_status_msg: discord.Message = None
+        self.last_status_timestamp = datetime.datetime.now() - datetime.timedelta(minutes=5)
         self.threads: dict[int, discord.Thread] = {}
-        self.cookies: dict | str = {}
+        self.cookies: dict = {}
 
-    def init_client(self, client: discord.Client, cookies: dict | str, channel: discord.abc.GuildChannel):
+        self.server_chat_id = (1 << 32) - 1
+        self.players[self.server_chat_id] = Player(self.server_chat_id, "** SERVER **")
+
+    async def init_client(self, client: discord.Client, cookies: dict | str, channel_prefix: str):
         """Initialize the discord.py client & channel refs and pass cookies
 
         Parameters
@@ -91,20 +104,40 @@ class Celestenet:
             discord.py channel reference to send messages to
         """
         self.client = client
-        self.channel = channel
+        self.channel = await self.channel_setup(channel_prefix + "chat")
+        self.status_channel = await self.channel_setup(channel_prefix + "status")
+        self.status_role = next(filter(lambda r: r.name == channel_prefix + "status", self.status_channel.guild.roles), None)
         if isinstance(cookies, str):
             self.cookies = json.loads(cookies)
         elif isinstance(cookies, dict):
             self.cookies = cookies
 
-    async def _log_exception(self, awaitable):
+    async def channel_setup(self, name):
+        channel_found = None
+        for channel in self.client.get_all_channels():
+            if channel.name == name:
+                channel_found = channel
+                break
+        if channel_found is not None:
+            await channel_found.send("Celestenet bot configured to use this channel.")
+        else:
+            print(f"Channel {name} not found!")
+        return channel_found
+
+    async def _log_exception(self, name, awaitable):
         """Just a helper to catch exceptions from the asyncio task
         """
         try:
             return await awaitable
         except Exception as e:
-            print ("socket_relay died")
+            await self.status_message("WARN", f"Task '{name}' died")
             traceback.print_exception(e)
+
+    async def status_message(self, prefix="INFO", message=""):
+        if self.status_channel is not None:
+            await self.status_channel.send(f"`[{prefix}] {message}`")
+        if prefix != "INFO":
+            print(f"[{prefix}] {message}")
 
     def get_task(self, name):
         """Get the asyncio task
@@ -114,22 +147,23 @@ class Celestenet:
     def check_tasks(self):
         """checks if asyncio tasks are still "alive"
         """
-        for t in self.tasks.keys():
-            if self.tasks[t] is None:
-                print (f"Creating task '{t}'")
-                self.tasks[t] = self.client.loop.create_task(self._log_exception(self.task_routines[t]()))
-            elif isinstance(self.tasks[t], asyncio.Task):
-                if self.tasks[t].cancelled():
-                    self.tasks[t] = None
-                if self.tasks[t].done():
-                    self.tasks[t] = None
+        for name, task in self.tasks.items():
+            if task is None:
+                self.client.loop.create_task(self.status_message("", f"Creating task '{name}'"))
+                self.tasks[name] = self.client.loop.create_task(self._log_exception(name, self.task_routines[name]()))
+            elif isinstance(task, asyncio.Task):
+                if task.cancelled():
+                    print(f"Task '{name}' was cancelled, resetting...")
+                    self.tasks[name] = None
+                if task.done():
+                    print(f"Task '{name}' is Done? Resetting...")
+                    self.tasks[name] = None
 
-    def chat_destructure(self, msg: str):
+    async def chat_destructure(self, msg: str):
         match = self.chat_regex.match(msg)
         if match is None:
-            print(f"Warning: Could not destructure chat message with Regex: {msg}")
+            await self.status_message("WARN", f"Warning: Could not destructure chat message with Regex: {msg}")
             return None
-        
         return ChatRegexGroup(match.groupdict())
 
     def get_channel_by_name(self, name):
@@ -142,8 +176,13 @@ class Celestenet:
         c: Channel = self.get_channel_by_name(name)
         if c:
             if c.ID not in self.threads:
-                msg = await self.channel.send(f"Creating thread for channel: {name}")
-                self.threads[c.ID] = await self.channel.create_thread(name = name, message = msg)
+                found_thread = next(filter(lambda t: t.name == name, self.channel.threads), None)
+                if found_thread is not None:
+                    msg = await self.channel.send(f"Found and reusing existing thread for channel: {name}")
+                    self.threads[c.ID] = found_thread
+                else:
+                    msg = await self.channel.send(f"Creating thread for channel: {name}")
+                    self.threads[c.ID] = await self.channel.create_thread(name = name, message = msg)
             return self.threads[c.ID]
         else:
             return None
@@ -160,59 +199,127 @@ class Celestenet:
         try:
             message = json.loads(data)
         except json.JSONDecodeError:
-            error = f"Failed to parse chat payload: {data}"
-            print(error)
-            await self.channel.send(error)
+            await self.status_message("ERROR",  f"Failed to parse chat payload: {data}")
             return
         
-        print(message)
+        print(data)
+
         if isinstance(message, dict):
             pid: int = message['PlayerID']
             chat_id: int = message['ID']
             author: Player = self.players.get(pid, None)
             icon = (self.origin + author.image) if author and author.image else None
 
-            content: ChatRegexGroup = self.chat_destructure(message['Text'])
+            content: ChatRegexGroup = await self.chat_destructure(message['Text'])
 
             if content is None:
-                await self.channel.send(f"Failed to parse chat message: {message}")
+                await self.status_message("WARN", f"Failed to parse chat message: {message}")
                 return
 
-            em = discord.Embed(description=content.text, timestamp = datetime.datetime.combine(datetime.date.today() , datetime.time.fromisoformat(content.time)))
-            em.set_author(name=str(author.name) if author else pid, icon_url = icon)
+            if (pid == self.server_chat_id and content.text is not None):
+                if (content.text.find("LATEST CLIENT") >= 0):
+                    print(f"// ------ {content.target} joined.")
+                    await self.channel.send(f"**{discord.utils.escape_markdown(content.target)}** joined the server.")
+                    return
+                elif (found := content.text.find("Page ")) >= 0:
+                    if (content.text.find("players") >= 0):
+                        content.text = "Channels " + content.text[found:]
+                    else:
+                        content.text = "Help " + content.text[found:]
+                elif content.text.count('\n') > 1:
+                    lines = list(filter(lambda l: len(l.strip()) > 0, content.text.splitlines(keepends=True)))
+                    content.text = lines[0] + " ... " + lines[-1]
+            
+            ts = None
+            #ts = datetime.datetime.combine(datetime.date.today() , datetime.time.fromisoformat(content.time).replace(tzinfo=ZoneInfo("Europe/Berlin")))
+            em = discord.Embed(title=f"whisper to {content.target}" if content.whisper else None, description=discord.utils.escape_markdown(content.text), timestamp = ts)
+            author_name = str(pid)
+            if author:
+                author_name = str(author.name)
+            if content.channel:
+                author_name = f"[{str(content.channel)}] {author_name}"
+            if pid == self.server_chat_id and content.target is not None:
+                author_name += " @ " + content.target
+            em.set_author(name = author_name, icon_url = icon)
             # em.add_field(name="Chat:", value=message['Text'], inline=True)
+            print(f"// --------- Chat: {content.text if pid == self.server_chat_id else message['Text']}")
 
-            dchan = self.channel
-            print(f"Checking channel {content.channel} for {author} in {author.channel if author else ''}: {self.get_channel_by_id(author.channel) if author else ''}.")
-            if author and content.channel:
-                if self.get_channel_by_id(author.channel):
-                    print(f"Creating/getting thread for channel {content.channel}...")
-                    dchan = await self.get_or_make_thread(content.channel)
-                    if dchan is None:
-                        print(f"Failed to create/get thread for channel {content.channel}.")
-                        dchan = self.channel
-                else:
-                    await self.channel.send(f"{author.name} sent message in {content.channel} but I have no knowledge of this channel. Auth issue?")
+            target_channel_name = None
+            if author and content.channel not in (None, "main"):
+                print(f"Creating/getting thread for channel {content.channel}...")
+                target_channel_name = content.channel
+            
+            tp_target_player = None
+            if content.text.startswith("/tp") and author and author.channel is not None:
+                tp_target_player = author
+            
+            if pid == self.server_chat_id and content.text.startswith(("Teleport", "Command tp")):
+                tp_target_player = next(filter(lambda p: p.name == content.target, self.players.values()), None)
+            
+            if tp_target_player and tp_target_player.channel is not None:
+                if (chan := self.get_channel_by_id(tp_target_player.channel)) is not None and chan.name not in (None, "main"):
+                    target_channel_name = chan.name
 
-            await self.mq.insert_or_update(chat_id, pid, em = em, channel = dchan, purge=False if not author else content.target == author.name)
+            target_channel = self.channel
+            if isinstance(target_channel_name, str):
+                target_channel = await self.get_or_make_thread(target_channel_name)
+                if target_channel is None:
+                    await self.status_message("WARN", f"Failed to create/get thread for channel {target_channel_name}.")
+                    target_channel = self.channel
+
+            await self.mq.insert_or_update(chat_id, pid, em = em, channel = target_channel, purge=False if not author else (content.target == author.name and not content.text.startswith("/")))
 
     @command_handler
     async def update(self, data: str):
-        data = json.loads(data)
+        try:
+            data = json.loads(data)
+        except json.decoder.JSONDecodeError:
+            await self.status_message("WARN", f"Failed to parse update cmd payload: {data}.")
+            return
         print(f"cmd update: {data}")
         match data:
             case str(s) if s.endswith("/players"):
-                self.get_players()
+                await self.get_players()
             case str(s) if s.endswith("/status"):
-                self.get_status()
+                await self.get_status()
             case str(s) if s.endswith("/channels"):
-                self.get_channels()
+                await self.get_channels()
             case _:
                 print(f"cmd update: {data} not implemented.")
 
-    def api_fetch(self, endpoint: str, requests_method=requests.get, requests_data: str = None, raw: bool = False):
+    async def update_bot_status(self):
+        self.activity.name=f"TCP / UDP: {self.status.get('TCPConnections', '?')} / {self.status.get('UDPConnections', '?')}"
+        self.activity.timestamps={"start": self.status.get('StartupTime', 0)/1000}
+        await self.client.change_presence(activity=self.activity)
+
+        tcp = self.status.get('TCPConnections', 0)
+        udp = self.status.get('UDPConnections', 0)
+        should_ping = self.status_role is not None and tcp > 2 and udp < max(tcp * .25, 2)
+
+        embed_age = 3600 + 1
+        if (self.last_status_msg is not None and isinstance(self.last_status_msg.created_at, datetime.datetime)):
+            embed_age = (datetime.datetime.now(tz=ZoneInfo("UTC")) - self.last_status_msg.created_at).total_seconds()
+
+        time_since_update = datetime.datetime.now() - self.last_status_timestamp
+        if (time_since_update.total_seconds() < 30 and not should_ping):
+            return
+
+        em = discord.Embed(
+            description=dedent(f"""
+                **Server Startup**: {datetime.datetime.fromtimestamp(int(self.status.get('StartupTime', 0)/1000))}
+                **Player Counter**: `{self.status.get('PlayerCounter', '?')}`
+                **Connections** / **TCP** / **UDP**: `{self.status.get('Connections', '?')}` / `{self.status.get('TCPConnections', '?')}` / `{self.status.get('UDPConnections', '?')}`
+            """))
+
+        if (should_ping or embed_age > 3600):
+            self.last_status_msg: discord.Message = await self.status_channel.send(content=self.status_role.mention if should_ping else None, embed=em)
+        else:
+            self.last_status_msg: discord.Message = await self.last_status_msg.edit(content=self.status_role.mention if should_ping else f"**Last updated**: <t:{int(self.last_status_timestamp.timestamp())}:R>", embed=em)
+        self.last_status_timestamp = datetime.datetime.now()
+
+    async def api_fetch(self, endpoint: str, requests_method=requests.get, requests_data: str = None, raw: bool = False):
         """Perform HTTP requests to Celestenet api
-        
+
         Parameters
         ----------
         endpoint: str
@@ -226,22 +333,23 @@ class Celestenet:
         """
         response = requests_method(self.api_base + endpoint, data=requests_data, cookies=self.cookies)
         if response.status_code != 200:
-            print(f"Failed api call {requests_method} to {endpoint} with status {response.status_code}")
-            return None
-        
-        if raw:
-            return response.text
-        
-        try:
-            return response.json()
-        except JSONDecodeError:
-            print(f"Error decoding {endpoint} response: {response.text}")
+            await self.status_message("WARN", f"Failed api call {requests_method} to {endpoint} with status {response.status_code}")
+            await self.status_message("WARN", f">> {response.text}")
             return None
 
-    def get_players(self):
+        if raw:
+            return response.text
+
+        try:
+            return response.json()
+        except json.decoder.JSONDecodeError:
+            await self.status_message("WARN", f"Error decoding {endpoint} response: {response.text}")
+            return None
+
+    async def get_players(self):
         """Wrapper logic around /api/players
         """
-        players = self.api_fetch("/players")
+        players = await self.api_fetch("/players")
         if isinstance(players, list):
             for pdict in players:
                 pid = pdict['ID']
@@ -249,17 +357,17 @@ class Celestenet:
                     p = Player()
                     self.players[pid] = p
                 self.players[pid].dict_update(pdict)
-    
-    def get_status(self):
+
+    async def get_status(self):
         """Wrapper logic around /api/status
         """
-        status = self.api_fetch("/status")
-        print(status)
+        self.status = await self.api_fetch("/status")
+        await self.update_bot_status()
 
-    def get_channels(self):
+    async def get_channels(self):
         """Wrapper logic around /api/channels
         """
-        channels = self.api_fetch("/channels")
+        channels = await self.api_fetch("/channels")
         if isinstance(channels, list):
             for cdict in channels:
                 cid = cdict['ID']
@@ -277,7 +385,7 @@ class Celestenet:
             await self.mq.prune()
             # print("Going to process MQ...")
             await self.mq.process()
-            print("Done processing.")
+
             await asyncio.sleep(1)
 
     async def socket_relay(self):
@@ -290,25 +398,26 @@ class Celestenet:
         """
         await self.client.wait_until_ready()
         print("Client ready.")
-        
-        authkey: str = None
-        auth = self.api_fetch("/auth", requests.post, '""')
+
+        auth = await self.api_fetch("/auth", requests.get)
 
         if isinstance(auth, dict) and 'Key' in auth:
-            authkey = auth['Key']
+            self.cookies['celestenet-session'] = auth['Key']
+            print(f"Auth'd to {self.cookies['celestenet-session']}")
         else:
+            self.cookies.pop('celestenet-session', None)
             print(f"Key not in reauth: {auth}")
-        print(f"Auth'd to {authkey}")
 
-        self.get_players()
-        self.get_channels()
-        
+        await self.get_status()
+        await self.get_players()
+        await self.get_channels()
+
         async for ws in websockets.connect(self.uri, origin=self.origin):
-            #if authkey:
-            #    await ws.send("cmd")
-            #    await ws.send("reauth")
-            #    await ws.send(json.dumps(authkey))
-            
+            if 'celestenet-session' in self.cookies:
+                await ws.send("cmd")
+                await ws.send("reauth")
+                await ws.send(json.dumps(self.cookies['celestenet-session']))
+
             while True:
                 try:
                     ws_data = await ws.recv()
@@ -323,19 +432,19 @@ class Celestenet:
                                 case _:
                                     print(f"Unknown ws 'type': {ws_data}")
                                     break
-                    
+
                         case Celestenet.State.WaitForCMDID:
                             ws_cmd = None
                             if ws_data in ws_commands:
                                 ws_cmd = ws_commands[ws_data]
-                            
+
                             if ws_cmd is None:
                                 print(f"Unknown ws command: {ws_data}")
                                 break
                             else:
                                 self.command_current = ws_cmd
                                 self.command_state = Celestenet.State.WaitForCMDPayload
-                        
+
                         case Celestenet.State.WaitForCMDPayload:
                             if self.command_current:
                                 await self.command_current(self, ws_data)
@@ -355,10 +464,12 @@ class Celestenet:
                             print(f"Unknown ws state: {self.command_state}")
                             self.command_state = Celestenet.State.WaitForType
                             self.command_current = None
-                    
+
                 except websockets.ConnectionClosed:
-                    print("websocket died.")
+                    await self.status_message("WARN", "websocket died.")
                     break
+            self.command_state = Celestenet.State.WaitForType
+            self.command_current = None
             print("We died.")
 
     class State(Enum):
@@ -370,7 +481,7 @@ class Celestenet:
         WaitForCMDPayload = auto()
 
         WaitForData = auto()
-        
+
 
 class MessageQueue:
 
@@ -385,15 +496,31 @@ class MessageQueue:
             self.embed = em
             self.msg = msg
             self.channel = channel
-            self.sent = msg != None
-        
-        async def send(self, update: bool = False):
-            if not self.sent:
+            self.sent_in = msg.channel if msg is not None else None
+            self.need_update = False
+            if (self.sent() and channel != msg.channel):
+                print(f"=== Warning ===\n Channel mismatch on existing msg added to queue: {channel} vs. {msg.channel}")
+
+        def sent(self):
+            return self.msg is not None and self.sent_in is not None
+
+        async def send(self):
+            if self.sent() and self.need_update:
+                if self.channel == self.sent_in:
+                    self.msg = await self.msg.edit(embed=self.embed)
+                else:
+                    print(f"Deleting message from {self.sent_in} because it belongs in {self.channel}")
+                    await self.msg.delete()
+                    self.msg = None
+                    self.sent_in = None
+                self.need_update = False
+            if self.sent_in is None:
                 self.msg = await self.channel.send(embed=self.embed)
-                self.sent = self.msg != None
-            elif update and self.msg is not None:
-                self.msg = await self.msg.edit(embed=self.embed)
-                self.sent = self.msg != None
+                if self.msg is not None:
+                    self.sent_in = self.channel
+                else:
+                    print(f"=== Warning ===\n Failed to send {self.embed} in {self.channel}")
+
 
     class Message:
         def __init__(self, chat, discord):
@@ -414,9 +541,9 @@ class MessageQueue:
         async with self.lock:
             while len(self.queue) > self.max_len:
                 drop_msg = self.queue.pop()
-                if not drop_msg.discord.sent:
-                    print("Warning: popped message before it was sent!")
-    
+                if drop_msg.discord.sent_in is None:
+                    print("popped message before it was sent!")
+
     def get_by_chat_id(self, chat_id: int):
         return next(filter(lambda m: m.chat.chat_id == chat_id, self.queue), None)
 
@@ -427,7 +554,7 @@ class MessageQueue:
         async with self.lock:
             found_msg = self.get_by_chat_id(chat_id)
 
-            print(f"Checking for {chat_id}: {found_msg}")
+            # print(f"Checking for {chat_id}: {found_msg}")
 
             if isinstance(found_msg, MessageQueue.Message):
                 if purge:
@@ -438,18 +565,19 @@ class MessageQueue:
                 found_msg.discord.embed = em
                 found_msg.discord.msg = msg
                 found_msg.discord.channel = channel
+                found_msg.discord.need_update = True
                 return
-            
+
             new_msg = MessageQueue.Message(
                 MessageQueue.ChatMsg(chat_id, user_id),
                 MessageQueue.DiscordMsg(em, msg, channel)
             )
 
-            print(f"[{MessageQueue.timestamp()}] Inserting into MQ: {new_msg.recv_time} {new_msg.chat.chat_id} {new_msg.discord.channel}")
+            #print(f"[{MessageQueue.timestamp()}] Inserting into MQ: {new_msg.recv_time} {new_msg.chat.chat_id} {new_msg.discord.channel}")
             self.queue.insert(0, new_msg)
 
     async def process(self):
         async with self.lock:
             for m in reversed(self.queue):
-                if not m.discord.sent and MessageQueue.timestamp() - m.recv_time > self.delay_before_send:
+                if m.discord.need_update or (not m.discord.sent() and MessageQueue.timestamp() - m.recv_time > self.delay_before_send):
                     await m.discord.send()
