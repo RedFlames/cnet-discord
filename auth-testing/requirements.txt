@@ -1,5 +1,0 @@
-python-dotenv
-websockets
-#Authlib
-requests
-#discord-oauth2

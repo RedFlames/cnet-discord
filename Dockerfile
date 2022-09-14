@@ -5,7 +5,8 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
-COPY . .
+COPY bot.py ./
+COPY celestenet.py ./
 
 RUN useradd appuser && chown -R appuser /app
 USER appuser

@@ -48,6 +48,56 @@ class ChatRegexGroup:
 
 ws_commands = {}
 
+class CelestenetListener:
+    def __init__(self, chat_channel: discord.abc.GuildChannel, status_channel: discord.abc.GuildChannel, status_role: discord.Role):
+        self.chat_channel: discord.abc.GuildChannel = chat_channel
+        self.status_channel: discord.abc.GuildChannel = status_channel
+        self.status_role: discord.Role = status_role
+        self.mq: MessageQueue = MessageQueue()
+        self.last_status_msg: discord.Message = None
+        self.last_status_timestamp = datetime.datetime.now() - datetime.timedelta(minutes=5)
+        self.threads: dict[int, discord.Thread] = {}
+
+    async def get_or_make_thread(self, channel:str, cid: int):
+        if cid not in self.threads:
+            found_thread = next(filter(lambda t: t.name == channel, self.chat_channel.threads), None)
+            if found_thread is not None:
+                msg = await self.chat_channel.send(f"Found and reusing existing thread for channel: {channel}")
+                self.threads[cid] = found_thread
+            else:
+                msg = await self.chat_channel.send(f"Creating thread for channel: {channel}")
+                self.threads[cid] = await self.chat_channel.create_thread(name = channel, message = msg)
+        return self.threads[cid]
+
+    async def status_message(self, prefix="INFO", message=""):
+        if self.status_channel is not None:
+            await self.status_channel.send(f"`[{prefix}] {message}`")
+
+    async def update_status(self, em, should_ping):
+        
+        embed_age = 3600 + 1
+        if (self.last_status_msg is not None and isinstance(self.last_status_msg.created_at, datetime.datetime)):
+            embed_age = (datetime.datetime.now(tz=ZoneInfo("UTC")) - self.last_status_msg.created_at).total_seconds()
+
+        time_since_update = datetime.datetime.now() - self.last_status_timestamp
+        if (time_since_update.total_seconds() < 30 and not should_ping):
+            return
+
+        if (should_ping or embed_age > 3600):
+            self.last_status_msg: discord.Message = await self.status_channel.send(content=self.status_role.mention if should_ping else None, embed=em)
+        else:
+            self.last_status_msg: discord.Message = await self.last_status_msg.edit(content=self.status_role.mention if should_ping else f"**Last updated**: <t:{int(self.last_status_timestamp.timestamp())}:R>", embed=em)
+        self.last_status_timestamp = datetime.datetime.now()
+
+    async def prune_threads(self):
+        """TODO: implement this :)))"""
+        pass
+
+    async def process(self):
+            await self.mq.prune()
+            await self.mq.process()
+    
+
 class Celestenet:
     def __init__(self):
         """Handles interactions with CN's JSON API and websocket
@@ -66,7 +116,7 @@ class Celestenet:
         }
         self.players: dict[int, Player] = {}
         self.channels: dict[int, Channel] = {}
-        self.mq: MessageQueue = MessageQueue()
+        
         self.command_state: Celestenet.State = Celestenet.State.WaitForType
         self.command_current = None
         self.status: dict[str, Any] = {}
@@ -79,18 +129,14 @@ class Celestenet:
 
         """ these three get set in init_client(...) below """
         self.client: discord.Client = None
-        self.channel: discord.abc.GuildChannel = None
-        self.status_channel: discord.abc.GuildChannel = None
-        self.status_role = None
-        self.last_status_msg: discord.Message = None
-        self.last_status_timestamp = datetime.datetime.now() - datetime.timedelta(minutes=5)
-        self.threads: dict[int, discord.Thread] = {}
         self.cookies: dict = {}
+
+        self.recipients: list[CelestenetListener] = []
 
         self.server_chat_id = (1 << 32) - 1
         self.players[self.server_chat_id] = Player(self.server_chat_id, "** SERVER **")
 
-    async def init_client(self, client: discord.Client, cookies: dict | str, channel_prefix: str):
+    async def init_client(self, client: discord.Client, cookies: dict | str):
         """Initialize the discord.py client & channel refs and pass cookies
 
         Parameters
@@ -104,25 +150,19 @@ class Celestenet:
             discord.py channel reference to send messages to
         """
         self.client = client
-        self.channel = await self.channel_setup(channel_prefix + "chat")
-        self.status_channel = await self.channel_setup(channel_prefix + "status")
-        self.status_role = next(filter(lambda r: r.name == channel_prefix + "status", self.status_channel.guild.roles), None)
         if isinstance(cookies, str):
             self.cookies = json.loads(cookies)
         elif isinstance(cookies, dict):
             self.cookies = cookies
 
-    async def channel_setup(self, name):
-        channel_found = None
-        for channel in self.client.get_all_channels():
-            if channel.name == name:
-                channel_found = channel
-                break
-        if channel_found is not None:
-            await channel_found.send("Celestenet bot configured to use this channel.")
-        else:
-            print(f"Channel {name} not found!")
-        return channel_found
+    async def add_recipient(self, chat_channel: discord.abc.GuildChannel, status_channel: discord.abc.GuildChannel, status_role: discord.Role):
+        try:
+            await chat_channel.send("Testing chat channel send...")
+            await status_channel.send("Testing status channel send...")
+            self.recipients.append(CelestenetListener(chat_channel, status_channel, status_role))
+            return "Successfully added listener channels."
+        except Exception as e :
+             return traceback.print_exception(e)
 
     async def _log_exception(self, name, awaitable):
         """Just a helper to catch exceptions from the asyncio task
@@ -134,8 +174,8 @@ class Celestenet:
             traceback.print_exception(e)
 
     async def status_message(self, prefix="INFO", message=""):
-        if self.status_channel is not None:
-            await self.status_channel.send(f"`[{prefix}] {message}`")
+        for rec in self.recipients:
+            await rec.status_message(prefix, message)
         if prefix != "INFO":
             print(f"[{prefix}] {message}")
 
@@ -172,23 +212,9 @@ class Celestenet:
     def get_channel_by_id(self, ID):
         return self.channels.get(ID, None)
 
-    async def get_or_make_thread(self, name):
-        c: Channel = self.get_channel_by_name(name)
-        if c:
-            if c.ID not in self.threads:
-                found_thread = next(filter(lambda t: t.name == name, self.channel.threads), None)
-                if found_thread is not None:
-                    msg = await self.channel.send(f"Found and reusing existing thread for channel: {name}")
-                    self.threads[c.ID] = found_thread
-                else:
-                    msg = await self.channel.send(f"Creating thread for channel: {name}")
-                    self.threads[c.ID] = await self.channel.create_thread(name = name, message = msg)
-            return self.threads[c.ID]
-        else:
-            return None
-
-    async def prune_threads(self):
-        await self.channel.send("TODO: implement this :)))")
+    async def to_chat_channels(self, msg: str):
+        for rec in self.recipients:
+            await rec.chat_channel.send(msg)
 
     @staticmethod
     def command_handler(cmd_fn):
@@ -219,7 +245,7 @@ class Celestenet:
             if (pid == self.server_chat_id and content.text is not None):
                 if (content.text.find("LATEST CLIENT") >= 0):
                     print(f"// ------ {content.target} joined.")
-                    await self.channel.send(f"**{discord.utils.escape_markdown(content.target)}** joined the server.")
+                    await self.to_chat_channels(f"**{discord.utils.escape_markdown(content.target)}** joined the server.")
                     return
                 elif (found := content.text.find("Page ")) >= 0:
                     if (content.text.find("players") >= 0):
@@ -260,14 +286,17 @@ class Celestenet:
                 if (chan := self.get_channel_by_id(tp_target_player.channel)) is not None and chan.name not in (None, "main"):
                     target_channel_name = chan.name
 
-            target_channel = self.channel
-            if isinstance(target_channel_name, str):
-                target_channel = await self.get_or_make_thread(target_channel_name)
-                if target_channel is None:
-                    await self.status_message("WARN", f"Failed to create/get thread for channel {target_channel_name}.")
-                    target_channel = self.channel
+            for rec in self.recipients:
+                rec_target_channel = rec.chat_channel
+                if isinstance(target_channel_name, str):
+                    target_channel_cnet: Channel = self.get_channel_by_name(target_channel_name)
+                    if target_channel_cnet:
+                        rec_target_channel = await rec.get_or_make_thread(target_channel_name, target_channel_cnet.ID)
+                    if rec_target_channel is None:
+                        await rec.status_message("WARN", f"Failed to create/get thread for channel {target_channel_name}.")
+                        rec_target_channel = rec.chat_channel
 
-            await self.mq.insert_or_update(chat_id, pid, em = em, channel = target_channel, purge=False if not author else (content.target == author.name and not content.text.startswith("/")))
+                await rec.mq.insert_or_update(chat_id, pid, em = em, channel = rec_target_channel, purge=False if not author else (content.target == author.name and not content.text.startswith("/")))
 
     @command_handler
     async def update(self, data: str):
@@ -294,15 +323,7 @@ class Celestenet:
 
         tcp = self.status.get('TCPConnections', 0)
         udp = self.status.get('UDPConnections', 0)
-        should_ping = self.status_role is not None and tcp > 2 and udp < max(tcp * .25, 2)
-
-        embed_age = 3600 + 1
-        if (self.last_status_msg is not None and isinstance(self.last_status_msg.created_at, datetime.datetime)):
-            embed_age = (datetime.datetime.now(tz=ZoneInfo("UTC")) - self.last_status_msg.created_at).total_seconds()
-
-        time_since_update = datetime.datetime.now() - self.last_status_timestamp
-        if (time_since_update.total_seconds() < 30 and not should_ping):
-            return
+        should_ping = tcp > 2 and udp < max(tcp * .25, 2)
 
         em = discord.Embed(
             description=dedent(f"""
@@ -310,12 +331,9 @@ class Celestenet:
                 **Player Counter**: `{self.status.get('PlayerCounter', '?')}`
                 **Connections** / **TCP** / **UDP**: `{self.status.get('Connections', '?')}` / `{self.status.get('TCPConnections', '?')}` / `{self.status.get('UDPConnections', '?')}`
             """))
-
-        if (should_ping or embed_age > 3600):
-            self.last_status_msg: discord.Message = await self.status_channel.send(content=self.status_role.mention if should_ping else None, embed=em)
-        else:
-            self.last_status_msg: discord.Message = await self.last_status_msg.edit(content=self.status_role.mention if should_ping else f"**Last updated**: <t:{int(self.last_status_timestamp.timestamp())}:R>", embed=em)
-        self.last_status_timestamp = datetime.datetime.now()
+        
+        for rec in self.recipients:
+            await rec.update_status(em, should_ping)
 
     async def api_fetch(self, endpoint: str, requests_method=requests.get, requests_data: str = None, raw: bool = False):
         """Perform HTTP requests to Celestenet api
@@ -381,10 +399,8 @@ class Celestenet:
 
     async def process(self):
         while True:
-            # print("Going to prune MQ...")
-            await self.mq.prune()
-            # print("Going to process MQ...")
-            await self.mq.process()
+            for rec in self.recipients:
+                await rec.process()
 
             await asyncio.sleep(1)
 
