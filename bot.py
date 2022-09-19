@@ -32,26 +32,25 @@ class MyClient(commands.Bot):
 
     @tasks.loop(seconds=10)
     async def task_loop_check(self):
-        #print("Checking tasks...")
-        if self.celery is None:
-            try:
+        try:
+            if self.celery is None:
                 self.celery = Celestenet()
                 await self.celery.init_client(self, os.getenv("CNET_COOKIE"))
-                self.celery.check_tasks()
-            except Exception as catch_all:
-                print ("socket_relay died")
-                traceback.print_exception(catch_all)
-        else:
-            self.celery.check_tasks()
+                print ("Celestenet wrapper instance init done.")
+            self.celery.update_tasks()
+        except Exception as catch_all:
+            print ("socket_relay died")
+            traceback.print_exception(catch_all)
 
     @task_loop_check.before_loop
     async def before_my_task(self):
         await self.wait_until_ready()  # wait until the bot logs in
+        print ("Bot loop task has achieved ready")
 
 intents=discord.Intents.default()
 intents.members = True
 intents.message_content = True
-bot = MyClient(command_prefix='!', intents=intents)
+bot = MyClient(command_prefix='!', intents=intents, allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=False) )
 
 @bot.command()
 async def addlistener(ctx, chat_channel: discord.TextChannel, status_channel: discord.TextChannel, status_role: discord.Role):
@@ -62,5 +61,13 @@ async def addlistener(ctx, chat_channel: discord.TextChannel, status_channel: di
     await ctx.send(f'Setting up listener for {chat_channel.mention} / {status_channel.mention} / @ {status_role.name} ...')
     ret = await bot.celery.add_recipient(chat_channel, status_channel, status_role)
     await ctx.send(f'Setup returned with: {ret}')
+
+@bot.command()
+async def testping(ctx: commands.Context):
+    if bot.celery is None:
+        await ctx.send(f'Celestenet wrapper not ready ...')
+        return
+    bot.celery.ping_on_next_status = True
+    await ctx.send(f'Bot will trigger ping on next status update.')
 
 bot.run(os.getenv("BOT_TOKEN"))
