@@ -3,3 +3,4 @@ python-dotenv
 websockets
 requests
 ptvsd
+tzdata

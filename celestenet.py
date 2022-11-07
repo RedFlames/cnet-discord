@@ -475,8 +475,8 @@ class Celestenet:
             return None
         
         excess = self.api_limiter.pop_last_excess()
-        if excess > 0:
-            await self.status_message("WARN", f"Too many API calls in last window! (allowed {excess} / {self.api_limiter.limit} in {self.api_limiter.window_size}s window)")
+        if excess > self.api_limiter.limit * 2:
+            await self.status_message("WARN", f"Too many API calls in last window! (allowed {self.api_limiter.limit} of {excess} in {self.api_limiter.window_size}s window)")
 
         """Perform HTTP requests to Celestenet api
 
