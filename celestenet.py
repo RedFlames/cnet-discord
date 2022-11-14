@@ -239,7 +239,7 @@ class Celestenet:
                         type=discord.ActivityType.watching,
                         details="Starting...", timestamps={"start": datetime.datetime.now().timestamp})
 
-        self.chat_regex = re.compile(r'(?sm)^\[(?P<time>[0-9:]+)\] (?: ?\[(?P<whisper>whisper)[^]]*\])? ?(?: ?\[channel (?P<channel>.+)\])? ?(?::celestenet_avatar_[0-9]+_: )?(?P<source>[^ ]+)(?: @ (?::celestenet_avatar_[0-9]+_: )?(?P<target>[^:]+))?: ?(?P<text>.*)$')
+        self.chat_regex = re.compile(r'(?sm)^\[(?P<time>[0-9:]+)\] (?: ?\[(?P<whisper>whisper)[^]]*\])? ?(?: ?\[channel (?P<channel>[^]]+)\])? ?(?::celestenet_avatar_[0-9]+_: )?(?P<source>[^ ]+)(?: @ (?::celestenet_avatar_[0-9]+_: )?(?P<target>[^:]+))?: ?(?P<text>.*)$')
         self.avatar_regex = re.compile(r':celestenet_avatar_[0-9]+_: ?')
 
         """ these three get set in init_client(...) below """
