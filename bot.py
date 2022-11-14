@@ -3,6 +3,8 @@
 import os
 import asyncio
 import traceback
+import json
+import requests
 
 import discord
 from discord.ext import commands, tasks
@@ -69,5 +71,17 @@ async def testping(ctx: commands.Context):
         return
     bot.celery.ping_on_next_status = True
     await ctx.send(f'Bot will trigger ping on next status update.')
+
+@bot.command()
+#@bot.is_in_guild(os.getenv("BOT_GUILD"))
+@commands.has_role(int(os.getenv("BOT_RESTARTER_ROLE")))
+async def restart(ctx: commands.Context):
+    payload=os.getenv("CNET_RESTART_REQ")
+    try:
+        payload=json.loads(payload)
+    except json.JSONDecodeError:
+        pass
+    ret = requests.post(os.getenv("CNET_RESTART_URI"), data=payload)
+    await ctx.send(f'Restart returned with: {ret.status_code} {ret.text}')
 
 bot.run(os.getenv("BOT_TOKEN"))
