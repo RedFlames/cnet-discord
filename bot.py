@@ -38,6 +38,7 @@ class MyClient(commands.Bot):
             if self.celery is None:
                 self.celery = Celestenet()
                 await self.celery.init_client(self, os.getenv("CNET_COOKIE"))
+                await self.celery.load_phrases(os.getenv("PHRASE_FILTER_FILE"))
                 print ("Celestenet wrapper instance init done.")
             self.celery.update_tasks()
         except Exception as catch_all:
@@ -83,5 +84,23 @@ async def restart(ctx: commands.Context):
         pass
     ret = requests.post(os.getenv("CNET_RESTART_URI"), data=payload)
     await ctx.send(f'Restart returned with: {ret.status_code} {ret.text}')
+
+@bot.command()
+@commands.has_role(int(os.getenv("BOT_RESTARTER_ROLE")))
+async def reload(ctx: commands.Context):
+    ret = await bot.celery.load_phrases(os.getenv("PHRASE_FILTER_FILE"))
+    await ctx.send(f'Returned with: {ret}')
+
+@bot.command()
+@commands.has_role(int(os.getenv("BOT_RESTARTER_ROLE")))
+async def check(ctx: commands.Context, phrase: str):
+    found = False
+    for p in bot.celery.phrases:
+        m = p.search(phrase)
+        if m is not None:
+            await ctx.send(f"Match found: {p} => {m.group(0)}")
+            found = True
+    if not found:
+        await ctx.send(f'No matches found for => {phrase}')
 
 bot.run(os.getenv("BOT_TOKEN"))

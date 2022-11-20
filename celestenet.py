@@ -55,7 +55,7 @@ class CelestenetListener:
         self.chat_channel: discord.abc.GuildChannel = chat_channel
         self.status_channel: discord.abc.GuildChannel = status_channel
         self.status_role: discord.Role = status_role
-        self.mq: MessageQueue = MessageQueue()
+        self.mq: MessageQueue = MessageQueue(status_role = status_role)
         self.last_status_msg: discord.Message = None
         self.last_status_timestamp = datetime.datetime.now() - datetime.timedelta(minutes=5)
         self.last_ping_timestamp = datetime.datetime.now() - datetime.timedelta(hours=5)
@@ -250,6 +250,7 @@ class Celestenet:
 
         self.server_chat_id = (1 << 32) - 1
         self.players[self.server_chat_id] = Player(self.server_chat_id, "** SERVER **")
+        self.phrases: list[str] = []
 
         self.ping_on_next_status = False
         self.last_status_update = time.time()
@@ -273,13 +274,25 @@ class Celestenet:
         elif isinstance(cookies, dict):
             self.cookies = cookies
 
+    async def load_phrases(self, file: str):
+        self.phrases = []
+        try:
+            with open(file) as f:
+                phrases = json.load(f)
+            for p in phrases:
+                print(f"Building regex {p}")
+                self.phrases.append(re.compile(p))
+            return f"Successfully loaded {file}."
+        except Exception as e:
+             return traceback.print_exception(e)
+
     async def add_recipient(self, chat_channel: discord.abc.GuildChannel, status_channel: discord.abc.GuildChannel, status_role: discord.Role):
         try:
             await chat_channel.send("Testing chat channel send...")
             await status_channel.send("Testing status channel send...")
             self.recipients.append(CelestenetListener(chat_channel, status_channel, status_role))
             return "Successfully added listener channels."
-        except Exception as e :
+        except Exception as e:
              return traceback.print_exception(e)
 
     async def _log_exception(self, name, awaitable):
@@ -349,6 +362,7 @@ class Celestenet:
 
             content: ChatRegexGroup = await self.chat_destructure(message['Text'])
             discord_message_text: str = None
+            naughty_word: str = None
 
             if content is None:
                 await self.status_message("WARN", f"Failed to parse chat message: {message}")
@@ -416,6 +430,16 @@ class Celestenet:
             if tp_target_player and tp_target_player.channel is not None:
                 if (chan := self.get_channel_by_id(tp_target_player.channel)) is not None and chan.name not in (None, "main"):
                     target_channel_name = chan.name
+            if content.channel in ("main", None) and content.target is None:
+                for p in self.phrases:
+                    m = p.search(content.text)
+                    if m is not None:
+                        naughty_word = m.group(0)
+                        if discord_message_text is None:
+                            discord_message_text = naughty_word
+                        else:
+                            discord_message_text = f"{discord_message_text} ({naughty_word})"
+                        break
 
             for rec in self.recipients:
                 rec_target_channel = rec.chat_channel
@@ -427,7 +451,7 @@ class Celestenet:
                         await rec.status_message("WARN", f"Failed to create/get thread for channel {target_channel_name}.")
                         rec_target_channel = rec.chat_channel
 
-                await rec.mq.insert_or_update(chat_id, pid, content = discord_message_text, em = em, channel = rec_target_channel, purge=False if not author else (content.target == author.name and not content.text.startswith("/")))
+                await rec.mq.insert_or_update(chat_id, pid, content = discord_message_text, em = em, channel = rec_target_channel, purge=False if not author else (content.target == author.name and not content.text.startswith("/")), ping = naughty_word is not None)
 
     @command_handler
     async def update(self, data: str):
@@ -666,9 +690,10 @@ class MessageQueue:
             self.channel = channel
 
     class DiscordMsg:
-        def __init__(self, content: str = "", em: discord.Embed = None, msg: discord.Message = None, channel: discord.TextChannel = None):
+        def __init__(self, content: str = "", em: discord.Embed = None, msg: discord.Message = None, channel: discord.TextChannel = None, ping: discord.Role = None):
             self.embed = em
-            self.content = content
+            self.ping = ping
+            self.content = content if ping is None else f"{content} {self.ping.mention}"
             self.msg = msg
             self.channel = channel
             self.sent_in = msg.channel if msg is not None else None
@@ -676,9 +701,10 @@ class MessageQueue:
             if (self.sent() and channel != msg.channel):
                 print(f"=== Warning ===\n Channel mismatch on existing msg added to queue: {channel} vs. {msg.channel}")
 
-        def update(self, content: str = "", em: discord.Embed = None, msg: discord.Message = None, channel: discord.TextChannel = None):
+        def update(self, content: str = "", em: discord.Embed = None, msg: discord.Message = None, channel: discord.TextChannel = None, ping: discord.Role = None):
             self.embed = em
-            self.content = content
+            self.ping = ping
+            self.content = content if ping is None else f"{content} {self.ping.mention}"
             self.msg = msg
             self.channel = channel
             self.need_update = True
@@ -697,7 +723,7 @@ class MessageQueue:
                     self.sent_in = None
                 self.need_update = False
             if self.sent_in is None:
-                self.msg = await self.channel.send(content=self.content, embed=self.embed)
+                self.msg = await self.channel.send(content=self.content, embed=self.embed, allowed_mentions=discord.AllowedMentions(everyone=False, roles=True) if self.ping else None)
                 if self.msg is not None:
                     self.sent_in = self.channel
                 else:
@@ -713,11 +739,12 @@ class MessageQueue:
     def timestamp():
         return int( time.time_ns() / 1000 )
 
-    def __init__(self, max_len: int = 40, delay_before_send: int = 500):
+    def __init__(self, max_len: int = 40, delay_before_send: int = 500, status_role: discord.Role = None):
         self.max_len = max_len
         self.delay_before_send = delay_before_send
         self.queue: list[MessageQueue.Message] = []
         self.lock = asyncio.Lock()
+        self.status_role = status_role
 
     async def prune(self):
         async with self.lock:
@@ -732,7 +759,7 @@ class MessageQueue:
     def get_by_msg_id(self, msg_id: int):
         return next(filter(lambda m: isinstance(m.discord.msg, discord.Message) and m.discord.msg.id == msg_id, self.queue), None)
 
-    async def insert_or_update(self, chat_id: int, user_id: int, content: str = None, em: discord.Embed = None, msg: discord.Message = None, channel: discord.TextChannel = None, purge: bool = False):
+    async def insert_or_update(self, chat_id: int, user_id: int, content: str = None, em: discord.Embed = None, msg: discord.Message = None, channel: discord.TextChannel = None, purge: bool = False, ping: bool = False):
         async with self.lock:
             found_msg = self.get_by_chat_id(chat_id)
 
@@ -744,12 +771,12 @@ class MessageQueue:
                     self.queue.remove(found_msg)
                     return
                 found_msg.chat.user = user_id
-                found_msg.discord.update(content, em, found_msg.discord.msg if msg is None else msg, channel)
+                found_msg.discord.update(content, em, found_msg.discord.msg if msg is None else msg, channel, self.status_role if ping else None)
                 return
 
             new_msg = MessageQueue.Message(
                 MessageQueue.ChatMsg(chat_id, user_id),
-                MessageQueue.DiscordMsg(content, em, msg, channel)
+                MessageQueue.DiscordMsg(content, em, msg, channel, self.status_role if ping else None)
             )
 
             #print(f"[{MessageQueue.timestamp()}] Inserting into MQ: {new_msg.recv_time} {new_msg.chat.chat_id} {new_msg.discord.channel}")
