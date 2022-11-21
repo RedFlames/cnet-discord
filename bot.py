@@ -103,4 +103,9 @@ async def check(ctx: commands.Context, phrase: str):
     if not found:
         await ctx.send(f'No matches found for => {phrase}')
 
+@bot.command()
+@commands.has_role(int(os.getenv("BOT_RESTARTER_ROLE")))
+async def prune_threads(ctx: commands.Context, days_old: int = 14):
+    await bot.celery.prune_threads(days_old)
+
 bot.run(os.getenv("BOT_TOKEN"))

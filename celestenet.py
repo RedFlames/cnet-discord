@@ -98,9 +98,40 @@ class CelestenetListener:
             self.last_status_msg: discord.Message = await self.last_status_msg.edit(content=f"**Last updated**: <t:{int(self.last_status_timestamp.timestamp())}:R>", embed=em)
         self.last_status_timestamp = datetime.datetime.now()
 
-    async def prune_threads(self):
-        """TODO: implement this :)))"""
-        pass
+    async def prune_threads(self, days_old = 14):
+        await self.status_channel.send(content=f"There are {len(self.chat_channel.threads)} in {self.chat_channel.mention}...")
+        for t in self.chat_channel.threads:
+            if t.message_count == 0:
+                await self.status_channel.send(content=f"There are no messages in {t.name}, deleting...")
+                await t.delete()
+                continue
+            try:
+                m = await t.fetch_message(t.last_message_id)
+            except discord.NotFound:
+                await self.status_channel.send(content=f"Failed to fetch last message of {t.name}, moving on...")
+                continue
+            if m is not None and isinstance(m.created_at, datetime.datetime):
+                if (datetime.datetime.now(tz=ZoneInfo("UTC")) - m.created_at).days > days_old:
+                    await self.status_channel.send(content=f"Last message in {t.name} is older than {days_old} days, deleting...")
+                    await t.delete()
+                continue
+        await self.status_channel.send(content=f"There are {len(self.chat_channel.threads)} in {self.chat_channel.mention} left after cleanup. Iterating archived threads...")
+        async for t in self.chat_channel.archived_threads():
+            if t.message_count == 0:
+                await self.status_channel.send(content=f"There are no messages in {t.name}, deleting...")
+                await t.delete()
+                continue
+            try:
+                m = await t.fetch_message(t.last_message_id)
+            except discord.NotFound:
+                await self.status_channel.send(content=f"Failed to fetch last message of {t.name}, moving on...")
+                continue
+            if m is not None and isinstance(m.created_at, datetime.datetime):
+                if (datetime.datetime.now(tz=ZoneInfo("UTC")) - m.created_at).days > days_old:
+                    await self.status_channel.send(content=f"Last message in {t.name} is older than {days_old} days, deleting...")
+                    await t.delete()
+                continue
+        await self.status_channel.send(content=f"There are {len(self.chat_channel.threads)} in {self.chat_channel.mention} left.")
 
     async def process(self):
             await self.mq.prune()
@@ -363,6 +394,8 @@ class Celestenet:
             content: ChatRegexGroup = await self.chat_destructure(message['Text'])
             discord_message_text: str = None
             naughty_word: str = None
+            show_embed: bool = True
+            check_name: bool = False
 
             if content is None:
                 await self.status_message("WARN", f"Failed to parse chat message: {message}")
@@ -374,8 +407,9 @@ class Celestenet:
             if (pid == self.server_chat_id and content.text is not None):
                 if (content.text.find("LATEST CLIENT") >= 0):
                     print(f"// ------ {content.target} joined.")
-                    await self.to_chat_channels(f"**{discord.utils.escape_markdown(content.target)}** joined the server.")
-                    return
+                    discord_message_text = f"**{discord.utils.escape_markdown(content.target)}** joined the server."
+                    show_embed = False
+                    check_name = True
                 elif (found := content.text.find("Page ")) >= 0:
                     if (content.text.find("players") >= 0):
                         content.text = "Channels " + content.text[found:]
@@ -387,7 +421,9 @@ class Celestenet:
             
             ts = None
             #ts = datetime.datetime.combine(datetime.date.today() , datetime.time.fromisoformat(content.time).replace(tzinfo=ZoneInfo("Europe/Berlin")))
-            em = discord.Embed(description=discord.utils.escape_markdown(content.text), timestamp = ts)
+            em = None
+            if show_embed:
+                em = discord.Embed(description=discord.utils.escape_markdown(content.text), timestamp = ts)
             author_name = str(pid)
             if author:
                 author_name = str(author.name)
@@ -397,7 +433,8 @@ class Celestenet:
                 author_name = f"[{str(content.channel)}] {author_name}"
             if pid == self.server_chat_id and content.target is not None:
                 author_name += " @ " + content.target
-            em.set_author(name = author_name, icon_url = icon)
+            if em is not None:
+                em.set_author(name = author_name, icon_url = icon)
             # em.add_field(name="Chat:", value=message['Text'], inline=True)
             print(f"// --------- Chat: {content.text if pid == self.server_chat_id else message['Text']}")
 
@@ -432,7 +469,7 @@ class Celestenet:
                     target_channel_name = chan.name
             if content.channel in ("main", None) and content.target is None:
                 for p in self.phrases:
-                    m = p.search(content.text)
+                    m = p.search(content.text if not check_name else content.target)
                     if m is not None:
                         naughty_word = m.group(0)
                         if discord_message_text is None:
@@ -489,10 +526,15 @@ class Celestenet:
                 **Server Startup**: {datetime.datetime.fromtimestamp(int(self.status.get('StartupTime', 0)/1000))}
                 **Player Counter**: `{self.status.get('PlayerCounter', '?')}`
                 **Connections** / **TCP** / **UDP**: `{self.status.get('Connections', '?')}` / `{self.status.get('TCPConnections', '?')}` / `{self.status.get('UDPConnections', '?')}`
-            """))
+            """
+        ))
         
         for rec in self.recipients:
             await rec.update_status(em, should_ping, self.activity.name)
+
+    async def prune_threads(self, days_old = 14):
+        for rec in self.recipients:
+            await rec.prune_threads(days_old)
 
     async def api_fetch(self, endpoint: str, requests_method=requests.get, requests_data: str = None, raw: bool = False):
         if self.api_limiter.limit_me():
