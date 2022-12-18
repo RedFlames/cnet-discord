@@ -14,16 +14,23 @@ import json
 import requests
 from textwrap import dedent
 
+strip_chars = ('\xad', '\xa0')
+
 class Player:
     def __init__(self, ID=0, name='', image=None):
         self.ID = ID
         self.name = name
+        for char in strip_chars:
+            self.name = self.name.replace(char, '')
+
         self.image = image
         self.channel = None
 
     def dict_update(self, pd: dict):
         self.ID = pd.get('ID', self.ID) 
         self.name = pd.get('FullName', self.name)
+        for char in strip_chars:
+            self.name = self.name.replace(char, '')
         self.image = pd.get('Avatar', self.image)
 
 class Channel:
@@ -391,7 +398,36 @@ class Celestenet:
             author: Player = self.players.get(pid, None)
             icon = (self.origin + author.image) if author and author.image else None
 
-            content: ChatRegexGroup = await self.chat_destructure(message['Text'])
+            #content: ChatRegexGroup = await self.chat_destructure(message['Text'])
+            content: ChatRegexGroup = ChatRegexGroup(
+                     {
+                          "time": message.get("DateTime", None),
+                          "channel": message.get("Tag", None),
+                          "whisper": (message.get("Targets", None) != None) and (message.get("Tag", None) == "whisper"),
+                          "source": author.name if author else pid,
+                          "target": message.get("Targets", None),
+                          "text": message.get("Text", None)
+                     }
+            )
+
+            if content.channel != None and content.channel.startswith("channel "):
+                content.channel = content.channel[8:]
+            if content.channel != None and len(content.channel.strip()) == 0:
+                content.channel = None
+            if isinstance(content.target, list) and len(content.target) > 0:
+                if len(content.target) == 1 and content.target[0] == pid and not content.whisper and not content.text.startswith("/"):
+                    print(f"// Dropping broadcast echo {pid} == {content.target}.")
+                    return
+                content.target = content.target[0]
+            if isinstance(content.target, int):
+                if content.target in self.players:
+                    content.target = self.players[content.target].name
+                else:
+                    content.target = str(content.target)
+
+            if content.text.startswith(("/w ", "/whisper", "/cc")):
+                print(f"// Dropping whisper/cc.")
+                return
             discord_message_text: str = None
             naughty_word: str = None
             show_embed: bool = True
@@ -428,11 +464,13 @@ class Celestenet:
             if author:
                 author_name = str(author.name)
             elif content.source:
-                author_name = content.source
+                author_name = str(content.source)
             if content.channel:
                 author_name = f"[{str(content.channel)}] {author_name}"
             if pid == self.server_chat_id and content.target is not None:
                 author_name += " @ " + content.target
+            for char in strip_chars:
+                author_name = author_name.replace(char, '')
             if em is not None:
                 em.set_author(name = author_name, icon_url = icon)
             # em.add_field(name="Chat:", value=message['Text'], inline=True)
@@ -467,6 +505,7 @@ class Celestenet:
             if tp_target_player and tp_target_player.channel is not None:
                 if (chan := self.get_channel_by_id(tp_target_player.channel)) is not None and chan.name not in (None, "main"):
                     target_channel_name = chan.name
+            print(f"{content.channel} / {content.target} / {check_name}")
             if content.channel in ("main", None) and content.target is None:
                 for p in self.phrases:
                     m = p.search(content.text if not check_name else content.target)
