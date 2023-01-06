@@ -441,7 +441,7 @@ class Celestenet:
                 content.text = self.avatar_regex.sub('', content.text)
 
             if (pid == self.server_chat_id and content.text is not None):
-                if (content.text.find("LATEST CLIENT") >= 0):
+                if (content.text.find("Latest Client: v2.") >= 0):
                     print(f"// ------ {content.target} joined.")
                     discord_message_text = f"**{discord.utils.escape_markdown(content.target)}** joined the server."
                     show_embed = False
@@ -506,7 +506,7 @@ class Celestenet:
                 if (chan := self.get_channel_by_id(tp_target_player.channel)) is not None and chan.name not in (None, "main"):
                     target_channel_name = chan.name
             print(f"{content.channel} / {content.target} / {check_name}")
-            if content.channel in ("main", None) and content.target is None:
+            if content.channel in ("main", None) and (check_name or (not content.whisper and pid != self.server_chat_id)) and not content.text.startswith(("/join !", "/channel !")):
                 for p in self.phrases:
                     m = p.search(content.text if not check_name else content.target)
                     if m is not None:
@@ -654,10 +654,10 @@ class Celestenet:
             try:
                 for rec in self.recipients:
                     await rec.process()
-                
+
                 if time.time() - self.last_status_update > 60:
                     await self.get_status()
-            
+
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 print("Process task received CancelledError. Exiting.")
