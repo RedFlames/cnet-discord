@@ -527,7 +527,7 @@ class Celestenet:
                         await rec.status_message("WARN", f"Failed to create/get thread for channel {target_channel_name}.")
                         rec_target_channel = rec.chat_channel
 
-                await rec.mq.insert_or_update(chat_id, pid, content = discord_message_text, em = em, channel = rec_target_channel, purge=False if not author else (content.target == author.name and not content.text.startswith("/")), ping = naughty_word is not None)
+                await rec.mq.insert_or_update(chat_id, pid, content = discord_message_text, em = em, channel = rec_target_channel, purge=False if not author else (content.target == author.name and not content.text.startswith("/")), ping = naughty_word is not None, was_delete=(message.get('Color','') == "#ee2233"))
 
     @command_handler
     async def update(self, data: str):
@@ -840,7 +840,7 @@ class MessageQueue:
     def get_by_msg_id(self, msg_id: int):
         return next(filter(lambda m: isinstance(m.discord.msg, discord.Message) and m.discord.msg.id == msg_id, self.queue), None)
 
-    async def insert_or_update(self, chat_id: int, user_id: int, content: str = None, em: discord.Embed = None, msg: discord.Message = None, channel: discord.TextChannel = None, purge: bool = False, ping: bool = False):
+    async def insert_or_update(self, chat_id: int, user_id: int, content: str = None, em: discord.Embed = None, msg: discord.Message = None, channel: discord.TextChannel = None, purge: bool = False, ping: bool = False, was_delete: bool = False):
         async with self.lock:
             found_msg = self.get_by_chat_id(chat_id)
 
@@ -852,7 +852,12 @@ class MessageQueue:
                     self.queue.remove(found_msg)
                     return
                 found_msg.chat.user = user_id
-                found_msg.discord.update(content, em, found_msg.discord.msg if msg is None else msg, channel, self.status_role if ping else None)
+                if was_delete:
+                    if found_msg.discord.content is None:
+                        found_msg.discord.content = "(deleted)"
+                    else:
+                        found_msg.discord.content = found_msg.discord.content + " (deleted)"
+                    found_msg.discord.update(content, em, found_msg.discord.msg if msg is None else msg, channel, self.status_role if ping else None)
                 return
 
             new_msg = MessageQueue.Message(
