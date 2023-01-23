@@ -23,6 +23,7 @@ class MyClient(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.celery: Celestenet = None
+        self.user_color: dict[int, str] = {}
 
     async def on_ready(self):
         print(f'Logged in as {self.user} (ID: {self.user.id})')
@@ -39,6 +40,10 @@ class MyClient(commands.Bot):
                 self.celery = Celestenet()
                 await self.celery.init_client(self, os.getenv("CNET_COOKIE"))
                 await self.celery.load_phrases(os.getenv("PHRASE_FILTER_FILE"))
+                await bot.celery.load_recipients(os.getenv("CHANNELS_ROLE_FILE"))
+
+                with open(os.getenv("USER_COLOR_FILE")) as f:
+                    self.user_color = json.load(f)
                 print ("Celestenet wrapper instance init done.")
             self.celery.update_tasks()
         except Exception as catch_all:
@@ -56,6 +61,7 @@ intents.message_content = True
 bot = MyClient(command_prefix='!', intents=intents, allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=False) )
 
 @bot.command()
+@commands.has_role(int(os.getenv("BOT_RESTARTER_ROLE")))
 async def addlistener(ctx, chat_channel: discord.TextChannel, status_channel: discord.TextChannel, status_role: discord.Role):
     """Add a 'listener' to the Celestenet class instance."""
     if bot.celery is None:
@@ -66,6 +72,7 @@ async def addlistener(ctx, chat_channel: discord.TextChannel, status_channel: di
     await ctx.send(f'Setup returned with: {ret}')
 
 @bot.command()
+@commands.has_role(int(os.getenv("BOT_RESTARTER_ROLE")))
 async def testping(ctx: commands.Context):
     if bot.celery is None:
         await ctx.send(f'Celestenet wrapper not ready ...')
@@ -107,5 +114,31 @@ async def check(ctx: commands.Context, phrase: str):
 @commands.has_role(int(os.getenv("BOT_RESTARTER_ROLE")))
 async def prune_threads(ctx: commands.Context, days_old: int = 14):
     await bot.celery.prune_threads(days_old)
+
+@bot.command()
+@commands.has_role(int(os.getenv("BOT_RESTARTER_ROLE")))
+async def set_color(ctx: commands.Context, col: str):
+    if not col.startswith("#"):
+        await ctx.send(f"Color '{col}' doesn't start with #")
+    try:
+        int(col[1:], 16)
+    except ValueError:
+        await ctx.send(f"Color '{col}' does not look hexadecimal.")
+    bot.user_color[ctx.message.author.id] = col
+
+    with open(os.getenv("USER_COLOR_FILE"), "w") as f:
+        json.dump(bot.user_color, f)
+
+    await ctx.send(f"Set {ctx.message.author} color to '{bot.user_color[ctx.message.author.id]}'.")
+
+@bot.command()
+@commands.has_role(int(os.getenv("BOT_RESTARTER_ROLE")))
+async def say(ctx: commands.Context, *, message: str):
+    color = bot.user_color.get(ctx.message.author.id, None)
+    if color:
+        ret = await bot.celery.invoke_wscmd("chatx", {"Color": color, "Text": message})
+    else:
+        ret = await bot.celery.invoke_wscmd("chat", message)
+    await ctx.send(f'Returned with: {ret}')
 
 bot.run(os.getenv("BOT_TOKEN"))

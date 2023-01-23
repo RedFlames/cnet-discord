@@ -254,6 +254,12 @@ class RateLimiter:
                 self.last_excess = self.attempts
             self.attempts = 0
 
+class WsQueueCmd:
+    def __init__(self, cmd: str, data):
+        self.cmd = cmd
+        self.data = data
+        self.result = None
+
 class Celestenet:
     def __init__(self):
         """Handles interactions with CN's JSON API and websocket
@@ -262,6 +268,11 @@ class Celestenet:
         self.origin: str = 'https://celestenet.0x0a.de'
         self.api_base: str = self.origin + '/api'
         self.api_limiter: RateLimiter = RateLimiter(10.0, 20)
+
+        self.ws: Optional[WebSocketClientProtocol] = None
+        self.ws_queue: dict[int, WsQueueCmd] = {}
+        self.ws_queue_max: int = 5
+        self.ws_queue_next: int = 0
 
         self.socket_task = TaskWrapper("socket", self.socket_relay, self._log_exception)
         self.process_task = TaskWrapper("process", self.process, self._log_exception)
@@ -324,11 +335,40 @@ class Celestenet:
         except Exception as e:
              return traceback.print_exception(e)
 
+    async def save_recipients(self, file: str|None = None):
+        if file is None:
+            file = self.rec_file
+        if file is None:
+            print(f"Couldn't save recipients to '{file}' / '{self.rec_file}'")
+        list_out = []
+        for r in self.recipients:
+            #chat_channel: discord.abc.GuildChannel, status_channel: discord.abc.GuildChannel, status_role: discord.Role
+            list_out.append({"guild": r.status_channel.guild.id, "chat": r.chat_channel.id, "status": r.status_channel.id, "role": r.status_role.id})
+        with open(self.rec_file, "w") as f:
+            json.dump(list_out, f)
+        print(f"Successfully saved recipients to {self.rec_file}.")
+
+    async def load_recipients(self, file: str):
+        self.rec_file = file
+        self.recipients = []
+        try:
+            recs = []
+            with open(self.rec_file) as f:
+                recs = json.load(f)
+            for r in recs:
+                print(f"Adding recipient {r}")
+                guild: discord.Guild = self.client.get_guild(r["guild"])
+                await self.add_recipient(guild.get_channel(r["chat"]), guild.get_channel(r["status"]), guild.get_role(r["role"]))
+            return f"Successfully loaded {self.rec_file}."
+        except Exception as e:
+             return traceback.print_exception(e)
+
     async def add_recipient(self, chat_channel: discord.abc.GuildChannel, status_channel: discord.abc.GuildChannel, status_role: discord.Role):
         try:
             await chat_channel.send("Testing chat channel send...")
             await status_channel.send("Testing status channel send...")
             self.recipients.append(CelestenetListener(chat_channel, status_channel, status_role))
+            await self.save_recipients()
             return "Successfully added listener channels."
         except Exception as e:
              return traceback.print_exception(e)
@@ -377,6 +417,30 @@ class Celestenet:
     async def to_chat_channels(self, msg: str):
         for rec in self.recipients:
             await rec.chat_channel.send(msg)
+
+    async def queue_wscmd(self, cmd: str, data):
+        if len(self.ws_queue) >= self.ws_queue_max:
+            return -1
+        self.ws_queue_next += 1
+        data = json.dumps(data)
+        print(f"Sending wscmd #{self.ws_queue_next}: {cmd} with data {data}")
+        await self.ws.send("cmd")
+        await self.ws.send(cmd)
+        await self.ws.send(data)
+        self.ws_queue[self.ws_queue_next]: WsQueueCmd = WsQueueCmd(cmd, data)
+        return self.ws_queue_next
+
+    async def invoke_wscmd(self, cmd: str, data):
+        i: int = await self.queue_wscmd(cmd, data)
+        if i < 0:
+            return "Unable to queue more ws cmds."
+        while i in self.ws_queue and self.ws_queue[i].result is None:
+            print(f"Command {i} awaiting response data...")
+            await asyncio.sleep(50)
+        queue_item = self.ws_queue.pop(i, None)
+        if queue_item is None:
+            return "Could not retrieve response."
+        return queue_item.result
 
     @staticmethod
     def command_handler(cmd_fn):
@@ -527,7 +591,7 @@ class Celestenet:
                         await rec.status_message("WARN", f"Failed to create/get thread for channel {target_channel_name}.")
                         rec_target_channel = rec.chat_channel
 
-                await rec.mq.insert_or_update(chat_id, pid, content = discord_message_text, em = em, channel = rec_target_channel, purge=False if not author else (content.target == author.name and not content.text.startswith("/")), ping = naughty_word is not None, was_delete=(message.get('Color','') == "#ee2233"))
+                await rec.mq.insert_or_update(chat_id, pid, content = discord_message_text, em = em, channel = rec_target_channel, purge=False if not author else (content.target == author.name and not content.text.startswith("/")), ping = naughty_word is not None, was_delete=(str(message.get('Color','')).lower() == "#ee2233"))
 
     @command_handler
     async def update(self, data: str):
@@ -689,6 +753,7 @@ class Celestenet:
         await self.get_channels()
 
         async for ws in websockets.connect(self.uri, origin=self.origin):
+            self.ws = ws
             if 'celestenet-session' in self.cookies:
                 await ws.send("cmd")
                 await ws.send("reauth")
@@ -696,6 +761,12 @@ class Celestenet:
 
             while True:
                 try:
+                    awaits_result: int|None = None
+                    if len(self.ws_queue) > 0:
+                        for k, v in self.ws_queue.items():
+                            if v.result is None:
+                                awaits_result = k
+
                     ws_data = await ws.recv()
 
                     match self.command_state:
@@ -732,7 +803,10 @@ class Celestenet:
                                 break
 
                         case Celestenet.State.WaitForData:
-                            print(f"Got ws 'data' which isn't properly implemented: {ws_data}")
+                            if awaits_result is None:
+                                print(f"Got ws 'data' but wasn't awaiting it: {ws_data}")
+                            else:
+                                self.ws_queue[awaits_result].result = ws_data
                             self.command_state = Celestenet.State.WaitForType
                             self.command_current = None
 
@@ -746,7 +820,10 @@ class Celestenet:
                     break
                 except asyncio.CancelledError:
                     print("Socket_relay received CancelledError. Exiting.")
-                    return
+                    break
+            for k, v in self.ws_queue.items():
+                self.ws_queue[k].result = "Websocket died."
+            self.ws = None
             self.command_state = Celestenet.State.WaitForType
             self.command_current = None
             print("We died.")
