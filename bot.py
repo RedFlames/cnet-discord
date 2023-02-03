@@ -42,8 +42,15 @@ class MyClient(commands.Bot):
                 await self.celery.load_phrases(os.getenv("PHRASE_FILTER_FILE"))
                 await bot.celery.load_recipients(os.getenv("CHANNELS_ROLE_FILE"))
 
-                with open(os.getenv("USER_COLOR_FILE")) as f:
-                    self.user_color = json.load(f)
+                try:
+                    with open(os.getenv("USER_COLOR_FILE")) as f:
+                        self.user_color = json.load(f)
+                        print(f'Loaded colors: {self.user_color}')
+                        print(f'(Red = {self.user_color["150091007680184320"]})')
+                except Exception as catch_all:
+                    print(f'Failed to load colors from {os.getenv("USER_COLOR_FILE")}')
+                    traceback.print_exception(catch_all)
+
                 print ("Celestenet wrapper instance init done.")
             self.celery.update_tasks()
         except Exception as catch_all:
@@ -133,8 +140,20 @@ async def set_color(ctx: commands.Context, col: str):
 
 @bot.command()
 @commands.has_role(int(os.getenv("BOT_RESTARTER_ROLE")))
+async def get_color(ctx: commands.Context):
+    color = bot.user_color.get(ctx.message.author.id, None)
+    if color is None:
+        color = bot.user_color.get(str(ctx.message.author.id), None)
+    await ctx.send(f'User {ctx.message.author.id} ({type(ctx.message.author.id)}) has color: {color}')
+
+
+@bot.command()
+@commands.has_role(int(os.getenv("BOT_RESTARTER_ROLE")))
 async def say(ctx: commands.Context, *, message: str):
     color = bot.user_color.get(ctx.message.author.id, None)
+    if color is None:
+        color = bot.user_color.get(str(ctx.message.author.id), None)
+
     if color:
         ret = await bot.celery.invoke_wscmd("chatx", {"Color": color, "Text": message})
     else:
