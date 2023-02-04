@@ -301,6 +301,8 @@ class Celestenet:
         self.players[self.server_chat_id] = Player(self.server_chat_id, "** SERVER **")
         self.phrases: list[str] = []
 
+        self.emote_replace: dict[str, str] = {}
+
         self.ping_on_next_status = False
         self.last_status_update = time.time()
 
@@ -322,6 +324,10 @@ class Celestenet:
             self.cookies = json.loads(cookies)
         elif isinstance(cookies, dict):
             self.cookies = cookies
+
+    async def set_emote_replaces(self, emote_replace: dict[str, str]):
+        for k, v in emote_replace.items():
+            self.emote_replace[k] = v
 
     async def load_phrases(self, file: str):
         self.phrases = []
@@ -518,7 +524,11 @@ class Celestenet:
                 elif content.text.count('\n') > 1:
                     lines = list(filter(lambda l: len(l.strip()) > 0, content.text.splitlines(keepends=True)))
                     content.text = lines[0] + " ... " + lines[-1]
-            
+
+            if not content.text.startswith("/"):
+                for k, v in self.emote_replace.items():
+                    content.text = content.text.replace(k, v)
+
             ts = None
             #ts = datetime.datetime.combine(datetime.date.today() , datetime.time.fromisoformat(content.time).replace(tzinfo=ZoneInfo("Europe/Berlin")))
             em = None
