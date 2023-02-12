@@ -569,17 +569,17 @@ class Celestenet:
             
             if pid == self.server_chat_id and content.text.startswith(("Teleport", "Command tp")):
                 tp_target_player = next(filter(lambda p: p.name == content.target, self.players.values()), None)
-                discord_message_text = f"{author.name} @ {discord.utils.escape_markdown(content.target)}: `{discord.utils.escape_markdown(content.text)}`"
+                discord_message_text = f"{author_name} @ {discord.utils.escape_markdown(content.target)}: `{discord.utils.escape_markdown(content.text)}`"
                 em = None
 
             if pid == self.server_chat_id and content.text.startswith(("Moved to", "Already in")):
-                discord_message_text = f"{author.name} @ {discord.utils.escape_markdown(content.target)}: `{discord.utils.escape_markdown(content.text)}`"
+                discord_message_text = f"{author_name} @ {discord.utils.escape_markdown(content.target)}: `{discord.utils.escape_markdown(content.text)}`"
                 em = None
 
             if tp_target_player and tp_target_player.channel is not None:
                 if (chan := self.get_channel_by_id(tp_target_player.channel)) is not None and chan.name not in (None, "main"):
                     target_channel_name = chan.name
-            print(f"{content.channel} / {content.target} / {check_name} / {author.name} / '{content.text}'")
+            print(f"{content.channel} / {content.target} / {check_name} / {author_name} / '{content.text}'")
             if content.channel in ("main", None) and (check_name or (not content.whisper and pid != self.server_chat_id)) and not content.text.startswith(("/join !", "/channel !")):
                 if not content.text.startswith("/") or content.text.startswith(("/join", "/channel")):
                     for p in self.phrases:
