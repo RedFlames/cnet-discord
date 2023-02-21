@@ -495,7 +495,7 @@ class Celestenet:
                 else:
                     content.target = str(content.target)
 
-            if content.text.startswith(("/w ", "/whisper", "/cc")):
+            if content.text.lower().startswith(("/w ", "/whisper", "/cc", "/channelchat")):
                 print(f"// Dropping whisper/cc.")
                 return
             discord_message_text: str = None
@@ -564,7 +564,7 @@ class Celestenet:
                 em = None
 
             tp_target_player = None
-            if content.text.startswith("/tp") and author and author.channel is not None:
+            if content.text.lower().startswith("/tp") and author and author.channel is not None:
                 tp_target_player = author
             
             if pid == self.server_chat_id and content.text.startswith(("Teleport", "Command tp")):
@@ -580,7 +580,7 @@ class Celestenet:
                 if (chan := self.get_channel_by_id(tp_target_player.channel)) is not None and chan.name not in (None, "main"):
                     target_channel_name = chan.name
             print(f"{content.channel} / {content.target} / {check_name} / {author_name} / '{content.text}'")
-            if content.channel in ("main", None) and (check_name or (not content.whisper and pid != self.server_chat_id)) and not content.text.startswith(("/join !", "/channel !")):
+            if content.channel in ("main", None) and (check_name or (not content.whisper and pid != self.server_chat_id)) and not content.text.lower().startswith(("/join !", "/channel !")):
                 if not content.text.startswith("/") or content.text.startswith(("/join", "/channel")):
                     for p in self.phrases:
                         m = p.search(content.text if not check_name else content.target)
@@ -602,7 +602,7 @@ class Celestenet:
                         await rec.status_message("WARN", f"Failed to create/get thread for channel {target_channel_name}.")
                         rec_target_channel = rec.chat_channel
 
-                await rec.mq.insert_or_update(chat_id, pid, content = discord_message_text, em = em, channel = rec_target_channel, purge=False if not author else (content.target == author.name and (content.text.startswith(("/gc ", "/globalchat ", "/r ", "/reply ")) or not content.text.startswith("/"))), ping = naughty_word is not None, was_delete=(str(message.get('Color','')).lower() == "#ee2233"))
+                await rec.mq.insert_or_update(chat_id, pid, content = discord_message_text, em = em, channel = rec_target_channel, purge=False if not author else (content.target == author.name and (content.text.lower().startswith(("/gc ", "/globalchat ", "/r ", "/reply ")) or not content.text.startswith("/"))), ping = naughty_word is not None, was_delete=(str(message.get('Color','')).lower() == "#ee2233"))
 
     @command_handler
     async def update(self, data: str):
@@ -671,9 +671,12 @@ class Celestenet:
         raw: bool
             Function tries to parse successful responses as JSON unless this is set to True
         """
-        response = requests_method(self.api_base + endpoint, data=requests_data, cookies=self.cookies)
+        try:
+            response = requests_method(self.api_base + endpoint, data=requests_data, cookies=self.cookies, timeout=8)
+        except requests.exceptions.ReadTimeout:
+            await self.status_message("WARN", f"Failed api call {requests_method} to {endpoint} (Read timeout)")
+            return None
         if response.status_code != 200:
-            await self.status_message("WARN", f"Failed api call {requests_method} to {endpoint} with status {response.status_code}")
             await self.status_message("WARN", f">> {response.text}")
             return None
 
@@ -685,6 +688,10 @@ class Celestenet:
         except json.decoder.JSONDecodeError:
             await self.status_message("WARN", f"Error decoding {endpoint} response: {response.text}")
             return None
+
+    async def clear_players(self):
+        self.players = {}
+        self.players[self.server_chat_id] = Player(self.server_chat_id, "** SERVER **")
 
     async def get_players(self):
         """Wrapper logic around /api/players
@@ -750,7 +757,9 @@ class Celestenet:
         await self.client.wait_until_ready()
         print("Client ready.")
 
-        auth = await self.api_fetch("/auth", requests.get)
+        auth = None
+        while auth == None:
+            auth = await self.api_fetch("/auth", requests.get)
 
         if isinstance(auth, dict) and 'Key' in auth:
             self.cookies['celestenet-session'] = auth['Key']

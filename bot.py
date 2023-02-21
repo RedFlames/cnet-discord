@@ -112,6 +112,7 @@ async def restart(ctx: commands.Context):
     except json.JSONDecodeError:
         pass
     ret = requests.post(os.getenv("CNET_RESTART_URI"), data=payload)
+    await bot.celery.clear_players()
     await ctx.send(f'Restart returned with: {ret.status_code} {ret.text}')
 
 @bot.command()
