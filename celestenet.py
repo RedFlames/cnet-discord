@@ -645,7 +645,18 @@ class Celestenet:
             p = Player()
             self.players[pid] = p
         self.players[pid].dict_update(data)
-        await self.send_to_recipients(-1, pid, '', f"**{self.players[pid].name}** joined the server.")
+
+        discord_message_text = f"**{self.players[pid].name}** joined the server."
+        naughty_word: str = None
+
+        for p in self.phrases:
+            m = p.search(self.players[pid].name)
+            if m is not None:
+                naughty_word = m.group(0)
+                discord_message_text = f"{discord_message_text} ({naughty_word})"
+                break
+        await self.send_to_recipients(-1, pid, '', discord_message_text, em=None, ping=(naughty_word is not None))
+
 
     @command_handler
     async def sess_leave(self, data: str):
