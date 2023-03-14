@@ -306,6 +306,9 @@ class Celestenet:
         self.ping_on_next_status = False
         self.last_status_update = time.time()
 
+        """ since I made a message ID kinda required, just gonna go into negative numbers with these... """
+        self.imaginary_chat_id: int = 0
+
     async def init_client(self, client: discord.Client, cookies: dict | str):
         """Initialize the discord.py client & channel refs and pass cookies
 
@@ -512,10 +515,8 @@ class Celestenet:
 
             if (pid == self.server_chat_id and content.text is not None):
                 if (content.text.find("Latest Client: v2.") >= 0):
-                    print(f"// ------ {content.target} joined.")
-                    discord_message_text = f"**{discord.utils.escape_markdown(content.target)}** joined the server."
-                    show_embed = False
-                    check_name = True
+                    print(f"// ------ {content.target} joined. (ignoring MOTD whisper)")
+                    return
                 elif (found := content.text.find("Page ")) >= 0:
                     if (content.text.find("players") >= 0):
                         content.text = "Channels " + content.text[found:]
@@ -591,18 +592,27 @@ class Celestenet:
                             else:
                                 discord_message_text = f"{discord_message_text} ({naughty_word})"
                             break
+            purge: bool = False if not author else (content.target == author.name and (content.text.lower().startswith(("/gc ", "/globalchat ", "/r ", "/reply ")) or not content.text.startswith("/")))
+            ping: bool = (naughty_word is not None)
+            was_delete: bool = (str(message.get('Color','')).lower() == "#ee2233")
+            await self.send_to_recipients(chat_id, pid, target_channel_name, discord_message_text, em, purge, ping, was_delete)
 
-            for rec in self.recipients:
-                rec_target_channel = rec.chat_channel
-                if isinstance(target_channel_name, str):
-                    target_channel_cnet: Channel = self.get_channel_by_name(target_channel_name)
-                    if target_channel_cnet:
-                        rec_target_channel = await rec.get_or_make_thread(target_channel_name, target_channel_cnet.ID)
-                    if rec_target_channel is None:
-                        await rec.status_message("WARN", f"Failed to create/get thread for channel {target_channel_name}.")
-                        rec_target_channel = rec.chat_channel
 
-                await rec.mq.insert_or_update(chat_id, pid, content = discord_message_text, em = em, channel = rec_target_channel, purge=False if not author else (content.target == author.name and (content.text.lower().startswith(("/gc ", "/globalchat ", "/r ", "/reply ")) or not content.text.startswith("/"))), ping = naughty_word is not None, was_delete=(str(message.get('Color','')).lower() == "#ee2233"))
+    async def send_to_recipients(self, chat_id: int, pid: int, target_channel_name: str, discord_message_text: str, em: discord.Embed|None = None, purge: bool = False, ping: bool = False, was_delete: bool = False):
+        if chat_id == -1:
+            self.imaginary_chat_id -= 1
+            chat_id = self.imaginary_chat_id
+        for rec in self.recipients:
+            rec_target_channel = rec.chat_channel
+            if isinstance(target_channel_name, str):
+                target_channel_cnet: Channel = self.get_channel_by_name(target_channel_name)
+                if target_channel_cnet:
+                    rec_target_channel = await rec.get_or_make_thread(target_channel_name, target_channel_cnet.ID)
+                if rec_target_channel is None:
+                    await rec.status_message("WARN", f"Failed to create/get thread for channel {target_channel_name}.")
+                    rec_target_channel = rec.chat_channel
+
+            await rec.mq.insert_or_update(chat_id, pid, content = discord_message_text, em = em, channel = rec_target_channel, purge=purge, ping = ping, was_delete=was_delete)
 
     @command_handler
     async def update(self, data: str):
@@ -621,6 +631,89 @@ class Celestenet:
                 await self.get_channels()
             case _:
                 print(f"cmd update: {data} not implemented.")
+
+    @command_handler
+    async def sess_join(self, data: str):
+        try:
+            data = json.loads(data)
+        except json.decoder.JSONDecodeError:
+            await self.status_message("WARN", f"Failed to parse cmd payload: {data}.")
+            return
+        print(f"cmd sess_join: {data}")
+        pid = data['ID']
+        if pid not in self.players:
+            p = Player()
+            self.players[pid] = p
+        self.players[pid].dict_update(data)
+        await self.send_to_recipients(-1, pid, '', f"**{self.players[pid].name}** joined the server.")
+
+    @command_handler
+    async def sess_leave(self, data: str):
+        try:
+            data = json.loads(data)
+        except json.decoder.JSONDecodeError:
+            await self.status_message("WARN", f"Failed to parse cmd payload: {data}.")
+            return
+        print(f"cmd sess_leave: {data}")
+        pid = data['ID']
+        if pid in self.players:
+            await self.send_to_recipients(-1, pid, '', f"**{self.players[pid].name}** left the server.")
+            del self.players[pid]
+
+    @command_handler
+    async def chan_move(self, data: str):
+        try:
+            data = json.loads(data)
+        except json.decoder.JSONDecodeError:
+            await self.status_message("WARN", f"Failed to parse chan_move cmd payload: {data}.")
+            return
+        print(f"cmd chan_move: {data}")
+        pid = data['SessionID']
+        fromid = data['fromID']
+        toid = data['toID']
+        if fromid in self.channels:
+            if pid in self.channels[fromid].players:
+                self.channels[fromid].players.remove(pid)
+        if toid in self.channels:
+            if pid not in self.channels[toid].players:
+                self.channels[toid].players.append(pid)
+        if pid in self.players:
+            self.players[pid].channel = toid
+
+    @command_handler
+    async def chan_create(self, data: str):
+        try:
+            data = json.loads(data)
+        except json.decoder.JSONDecodeError:
+            await self.status_message("WARN", f"Failed to parse chan_create cmd payload: {data}.")
+            return
+        print(f"cmd chan_create: {data}")
+        if len(self.channels)+1 != data['Count']:
+            await self.get_channels()
+        else:
+            cid = data['Channel']['ID']
+            if cid not in self.channels:
+                c = Channel()
+                self.channels[cid] = c
+            self.channels[cid].dict_update(data['Channel'])
+            for pid in self.channels[cid].players:
+                if pid in self.players:
+                    self.players[pid].channel = cid
+
+    @command_handler
+    async def chan_remove(self, data: str):
+        try:
+            data = json.loads(data)
+        except json.decoder.JSONDecodeError:
+            await self.status_message("WARN", f"Failed to parse chan_remove cmd payload: {data}.")
+            return
+        print(f"cmd chan_remove: {data}")
+        if len(self.channels)+1 != data['Count']:
+            await self.get_channels()
+        else:
+            cid = data['Channel']['ID']
+            if cid in self.channels:
+                del self.channels[cid]
 
     async def update_bot_status(self):
         if self.status is None or not isinstance(self.status, dict):
