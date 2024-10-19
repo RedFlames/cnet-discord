@@ -30,15 +30,23 @@ class CelesteNetChat:
 
     def __init__(self):
         self.cookies = os.getenv("CNET_COOKIE")
+        #self.cookies = '{"celestenet-key":"0218d174e60c4bd4", "celestenet-discordauth":"xjBDRETFq2aK83bDcr1GxL2u1tyPKv", "celestenet-session": "214c3291-ad8f-4cef-b1ad-5b2fe40dcb15"}'
         if isinstance(self.cookies, str):
             self.cookies = json.loads(self.cookies)
 
         self.command_state = State.WaitForType
         self.command_current = None
 
-        self.ws_uri: str = 'wss://celestenet.0x0a.de/api/ws'
-        self.origin: str = 'https://celestenet.0x0a.de'
+        #self.ws_uri: str = 'wss://celestenet.0x0a.de/api/ws'
+        #self.origin: str = 'https://celestenet.0x0a.de'
+
+        #self.server: str = 'DESKTOP-BMPV2QM.fritz.box:3800'
+        #self.server: str = '192.168.178.31:3800'
+        self.server: str = 'celestenet.0x0a.de:17240'
+
+        self.origin: str = 'http://' + self.server
         self.api_base: str = self.origin + '/api'
+        self.ws_uri: str = 'ws://' + self.server + '/api/ws'
 
         self.players: dict[int, str] = {}
         self.channels: dict[int, str] = {}
@@ -116,10 +124,30 @@ class CelesteNetChat:
         except json.JSONDecodeError:
             self.status_message("ERROR",  f"Failed to parse chat payload: {data}")
             return
+        print(f"{message}")
 
         # idk do stuff here lol I'm getting tired of copying from celestenet.py
-        print(data.replace('\n',' '))
+        print(data.replace('\n',' ').replace('\r',' '))
 
+    @command_handler
+    def chan_create(self, data: str):
+        print(data.replace('\n',' ').replace('\r',' '))
+
+    @command_handler
+    def chan_move(self, data: str):
+        print(data.replace('\n',' ').replace('\r',' '))
+
+    @command_handler
+    def chan_remove(self, data: str):
+        print(data.replace('\n',' ').replace('\r',' '))
+
+    @command_handler
+    def sess_join(self, data: str):
+        print(data.replace('\n',' ').replace('\r',' '))
+
+    @command_handler
+    def sess_leave(self, data: str):
+        print(data.replace('\n',' ').replace('\r',' '))
 
     @command_handler
     def update(self, data: str):
@@ -146,7 +174,7 @@ class CelesteNetChat:
             - attempts auth against WS too
             - handles the various WS commands
         """
-
+        print(f"Fetching /auth ...")
         auth = self.api_fetch("/auth", requests.get)
 
         if isinstance(auth, dict) and 'Key' in auth:
@@ -156,9 +184,11 @@ class CelesteNetChat:
             self.cookies.pop('celestenet-session', None)
             self.status_message(f"Key not in reauth: {auth}")
 
+        print(f"Getting status, players, channels ...")
         self.get_status()
         self.get_players()
         self.get_channels()
+        print(f"Starting websocket ...")
 
         async for ws in websockets.connect(self.ws_uri, origin=self.origin):
             if 'celestenet-session' in self.cookies:
@@ -166,6 +196,7 @@ class CelesteNetChat:
                 await ws.send("reauth")
                 await ws.send(json.dumps(self.cookies['celestenet-session']))
 
+            print(f"Going into main loop ...")
             while True:
                 try:
                     ws_data = await ws.recv()
@@ -188,7 +219,10 @@ class CelesteNetChat:
 
                             if ws_cmd is None:
                                 print(f"Unknown ws command: {ws_data}")
-                                break
+                                print(f"                  Unknown ws command: {ws_data}")
+                                print(f"                                           Unknown ws command: {ws_data}")
+                                self.command_state = State.WaitForType
+                                self.command_current = None
                             else:
                                 self.command_current = ws_cmd
                                 self.command_state = State.WaitForCMDPayload
@@ -200,8 +234,8 @@ class CelesteNetChat:
                                 self.command_current = None
                             else:
                                 print(f"Got payload but no current command: {ws_data}")
+                                self.command_state = State.WaitForType
                                 self.command_current = None
-                                break
 
                         case State.WaitForData:
                             print(f"Got ws 'data' which isn't properly implemented: {ws_data}")
