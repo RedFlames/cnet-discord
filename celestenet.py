@@ -273,6 +273,7 @@ class Celestenet:
         self.origin: str = 'https://celestenet.0x0a.de'
         self.api_base: str = self.origin + '/api'
         self.api_limiter: RateLimiter = RateLimiter(10.0, 20)
+        self.backoff_auth: ExponentialBackoff = ExponentialBackoff(0, 3600, 30)
 
         self.ws: Optional[WebSocketClientProtocol] = None
         self.ws_queue: dict[int, WsQueueCmd] = {}
@@ -815,6 +816,9 @@ class Celestenet:
             await rec.prune_threads(days_old)
 
     async def api_fetch(self, endpoint: str, requests_method=requests.get, requests_data: str = None, raw: bool = False):
+        if endpoint == '/auth' and not self.backoff_auth.retry():
+            return None
+
         if self.api_limiter.limit_me():
             return None
         
@@ -920,12 +924,15 @@ class Celestenet:
     async def reauth(self):
         auth = None
         while auth == None:
+            self.backoff_auth.update()
             auth = await self.api_fetch("/auth", requests.get)
+            await asyncio.sleep(5)
 
         if isinstance(auth, dict) and 'Key' in auth:
             self.cookies['celestenet-session'] = auth['Key']
             await self.status_message(f"Auth: {auth['Info']}")
             self.ws_needs_reauth = True
+            self.backoff_auth.reset()
         else:
             self.cookies.pop('celestenet-session', None)
             await self.status_message(f"Key not in reauth: {auth}")
