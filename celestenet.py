@@ -1,16 +1,16 @@
 import datetime
+import os
 import random
 from zoneinfo import ZoneInfo
 from enum import Enum, auto
 import re
 import time
 import traceback
-from types import coroutine
-from typing import Any
-import discord
-import websockets
+from typing import Any, Optional
 import asyncio
 import json
+import discord
+import websockets
 import requests
 from textwrap import dedent
 
@@ -84,9 +84,9 @@ class CelestenetListener:
                 self.threads[cid] = await self.chat_channel.create_thread(name = channel, message = msg)
         return self.threads[cid]
 
-    async def status_message(self, prefix="INFO", message=""):
+    async def status_message(self, prefix="INFO", message="", coded=True):
         if self.status_channel is not None:
-            await self.status_channel.send(f"`[{prefix}] {message}`")
+            await self.status_channel.send(f"`[{prefix}] {message}`" if coded else f"**[{prefix}]** {message}")
 
     async def update_status(self, em: discord.Embed, should_ping, ping_msg: str | None = None):
         
@@ -146,8 +146,8 @@ class CelestenetListener:
         await self.status_channel.send(content=f"There are {len(self.chat_channel.threads)} in {self.chat_channel.mention} left.")
 
     async def process(self):
-            await self.mq.prune()
-            await self.mq.process()
+        await self.mq.prune()
+        await self.mq.process()
 
 class ExponentialBackoff:
     def __init__(self, min_seconds: int, max_seconds: int, reset_seconds: int, min_count: int = 0):
@@ -259,6 +259,105 @@ class RateLimiter:
                 self.last_excess = self.attempts
             self.attempts = 0
 
+class AutoRestartMetrics:
+    def __init__(self, player_limit_low: int, player_limit_high: int, player_limit_step_up: int, limit_step_up_window_h: float, days_cycle: int, force_at_limit: bool):
+        self._is_active: bool = True
+        self.player_limit_low: int = player_limit_low
+        self.player_limit_high: int = player_limit_high
+        self.player_limit_current: int = player_limit_low
+        self.player_limit_step_up: int = player_limit_step_up
+        self.limit_step_up_window: float = limit_step_up_window_h * 3600
+        self.cooldown: float = days_cycle * 24 * 3600
+
+        self.next_possible_restart: float = time.time() + self.cooldown
+        self.exceeded_cooldown: bool = False
+        self.exceeded_cooldown_at: float|None = None
+        self.reset_cooldown()
+
+        self.next_step_up_at: float = time.time() + self.limit_step_up_window
+        self.force_at_limit = force_at_limit
+
+        self.initial_start_time: datetime.datetime = None
+        self.initial_start_delaying: bool = False
+        self.set_initial_start(8)
+
+    def set_initial_start(self, hour_of_day: int = None):
+        self.reset()
+        if hour_of_day:
+            self.initial_delay_to_hour: int = hour_of_day
+        self.initial_start_time = datetime.datetime.now(datetime.timezone.utc)
+        if self.initial_start_time.hour >= self.initial_delay_to_hour:
+            self.initial_start_time += datetime.timedelta(days=1)
+        self.initial_start_time = self.initial_start_time.replace(hour=self.initial_delay_to_hour, minute=0)
+        self.initial_start_delaying = True
+
+    @property
+    def is_active(self):
+        return self._is_active
+    
+    @is_active.setter
+    def is_active(self, value):
+        if not self._is_active and value:
+            self.set_initial_start()
+        self._is_active = value
+
+    def toggle_active(self):
+        self.is_active = not self._is_active
+
+    def set_days_cycle(self, number_of_days: int):
+        self.cooldown: float = number_of_days * 24 * 3600
+
+    def reset_cooldown(self):
+        self.next_possible_restart: float = time.time() + self.cooldown
+        self.exceeded_cooldown: bool = False
+        self.exceeded_cooldown_at: float|None = None
+
+    def update(self) -> bool:
+        if not self.is_active:
+            return False
+
+        if self.initial_start_delaying:
+            if time.time() > self.initial_start_time.timestamp():
+                self.initial_start_delaying = False
+                self.reset_cooldown()
+            else:
+                return False
+
+        if time.time() > self.next_possible_restart and not self.exceeded_cooldown:
+            self.exceeded_cooldown = True
+            self.next_step_up_at: float = time.time() + self.limit_step_up_window
+            self.exceeded_cooldown_at: float|None = time.time()
+        
+        if self.exceeded_cooldown:
+            if time.time() > self.next_step_up_at and self.step_up():
+                return True
+        return False
+        
+    def step_up(self):
+        if self.player_limit_current < self.player_limit_high:
+            self.player_limit_current += self.player_limit_step_up
+        elif self.player_limit_current == self.player_limit_high and not self.force_at_limit:
+            old_exc_cd = self.exceeded_cooldown_at
+            self.reset()
+            self.next_possible_restart = old_exc_cd + 24 * 3600
+            return False
+        self.next_step_up_at = time.time() + self.limit_step_up_window
+        return True
+
+    def reset(self):
+        self.player_limit_current = self.player_limit_low
+        self.reset_cooldown()
+    
+    def should_restart(self, player_count: int) -> bool:
+        if not self.is_active:
+            return False
+        if self.exceeded_cooldown and player_count <= self.player_limit_current:
+            return True
+        if self.force_at_limit and self.player_limit_current == self.player_limit_high:
+            return True
+        return False
+
+
 class WsQueueCmd:
     def __init__(self, cmd: str, data):
         self.cmd = cmd
@@ -275,7 +374,7 @@ class Celestenet:
         self.api_limiter: RateLimiter = RateLimiter(10.0, 20)
         self.backoff_auth: ExponentialBackoff = ExponentialBackoff(0, 3600, 30)
 
-        self.ws: Optional[WebSocketClientProtocol] = None
+        self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self.ws_queue: dict[int, WsQueueCmd] = {}
         self.ws_queue_max: int = 5
         self.ws_queue_next: int = 0
@@ -304,6 +403,7 @@ class Celestenet:
         self.ws_needs_reauth = False
 
         self.recipients: list[CelestenetListener] = []
+        self.rec_file: str = ''
 
         self.server_chat_id = (1 << 32) - 1
         self.players[self.server_chat_id] = Player(self.server_chat_id, "** SERVER **")
@@ -316,6 +416,24 @@ class Celestenet:
 
         """ since I made a message ID kinda required, just gonna go into negative numbers with these... """
         self.imaginary_chat_id: int = 0
+
+        # With a cooldown of 24 hours, auto-restart when below 10 players, or
+        # when cooldown exceeded, raise player threshold by 5 every 5 hours.
+        # e.g. if never below 10, but 
+        # <= 15 players at 29h -> restart
+        # <= 20 players at 34h -> restart [...]
+        # up to <= 40 player restart at 55h (seems unlikely that we will not dip below this or earlier limits in the time frame.)
+        self.auto_restart_metrics: AutoRestartMetrics = AutoRestartMetrics(10, 35, 5, 1.0, 2, False)
+
+        self.sched_restart: bool = False
+        self.sched_res_init_at: int = 0
+        self.sched_res_delay: int = 0
+        self.sched_last_notif_at: int = 0
+        self.sched_next_notif_at: int = 0
+
+        self.restarter_failsafe_tripped: bool = False
+        self.restarter_failsafe_counter: int = 0
+        self.restarter_last_restart: int = time.time()
 
     async def init_client(self, client: discord.Client, cookies: dict | str):
         """Initialize the discord.py client & channel refs and pass cookies
@@ -343,14 +461,14 @@ class Celestenet:
     async def load_phrases(self, file: str):
         self.phrases = []
         try:
-            with open(file) as f:
+            with open(file, encoding="utf-8") as f:
                 phrases = json.load(f)
             for p in phrases:
                 print(f"Building regex {p}")
                 self.phrases.append(re.compile(p))
             return f"Successfully loaded {file}."
         except Exception as e:
-             return traceback.print_exception(e)
+            return traceback.print_exception(e)
 
     async def save_recipients(self, file: str|None = None):
         if file is None:
@@ -361,7 +479,7 @@ class Celestenet:
         for r in self.recipients:
             #chat_channel: discord.abc.GuildChannel, status_channel: discord.abc.GuildChannel, status_role: discord.Role
             list_out.append({"guild": r.status_channel.guild.id, "chat": r.chat_channel.id, "status": r.status_channel.id, "role": r.status_role.id, "threads-non-main": r.use_threads})
-        with open(self.rec_file, "w") as f:
+        with open(self.rec_file, "w", encoding="utf-8") as f:
             json.dump(list_out, f)
         print(f"Successfully saved recipients to {self.rec_file}.")
 
@@ -370,7 +488,7 @@ class Celestenet:
         self.recipients = []
         try:
             recs = []
-            with open(self.rec_file) as f:
+            with open(self.rec_file, encoding="utf-8") as f:
                 recs = json.load(f)
             for r in recs:
                 print(f"Adding recipient {r}")
@@ -379,9 +497,9 @@ class Celestenet:
                 await self.add_recipient(guild.get_channel(r["chat"]), guild.get_channel(r["status"]), guild.get_role(r["role"]), threads_non_main is True)
             return f"Successfully loaded {self.rec_file}."
         except Exception as e:
-             return traceback.print_exception(e)
+            return traceback.print_exception(e)
 
-    async def add_recipient(self, chat_channel: discord.abc.GuildChannel, status_channel: discord.abc.GuildChannel, status_role: discord.Role, use_threads):
+    async def add_recipient(self, chat_channel: discord.abc.GuildChannel, status_channel: discord.abc.GuildChannel, status_role: discord.Role, use_threads: bool):
         try:
             await chat_channel.send("Testing chat channel send...")
             await status_channel.send("Testing status channel send...")
@@ -389,7 +507,7 @@ class Celestenet:
             await self.save_recipients()
             return "Successfully added listener channels."
         except Exception as e:
-             return traceback.print_exception(e)
+            return traceback.print_exception(e)
 
     async def _log_exception(self, name, awaitable):
         """Just a helper to catch exceptions from the asyncio task
@@ -400,9 +518,9 @@ class Celestenet:
             await self.status_message("WARN", f"Task '{name}' died")
             traceback.print_exception(e)
 
-    async def status_message(self, prefix="INFO", message=""):
+    async def status_message(self, prefix="INFO", message="", coded=True):
         for rec in self.recipients:
-            await rec.status_message(prefix, message)
+            await rec.status_message(prefix, message, coded)
         if prefix != "INFO":
             print(f"[{prefix}] {message}")
 
@@ -445,7 +563,7 @@ class Celestenet:
         await self.ws.send("cmd")
         await self.ws.send(cmd)
         await self.ws.send(data)
-        self.ws_queue[self.ws_queue_next]: WsQueueCmd = WsQueueCmd(cmd, data)
+        self.ws_queue[self.ws_queue_next] = WsQueueCmd(cmd, data)
         return self.ws_queue_next
 
     async def invoke_wscmd(self, cmd: str, data):
@@ -508,7 +626,7 @@ class Celestenet:
                     content.target = str(content.target)
 
             if content.text.lower().startswith(("/w ", "/whisper", "/cc", "/channelchat")):
-                print(f"// Dropping whisper/cc.")
+                print("// Dropping whisper/cc.")
                 return
             discord_message_text: str = None
             naughty_word: str = None
@@ -628,8 +746,8 @@ class Celestenet:
                     if target_channel_cnet and rec.use_threads:
                         rec_target_channel = await rec.get_or_make_thread(target_channel_name, target_channel_cnet.ID)
                     if rec_target_channel is None:
-                            await rec.status_message("WARN", f"Failed to create/get thread for channel {target_channel_name}.")
-                            rec_target_channel = rec.chat_channel
+                        await rec.status_message("WARN", f"Failed to create/get thread for channel {target_channel_name}.")
+                        rec_target_channel = rec.chat_channel
             if rec_target_channel and not drop_this:
                 print(f"rec.mq.insert_or_update {chat_id} {rec_target_channel}")
                 await rec.mq.insert_or_update(chat_id, pid, content = discord_message_text, em = em, channel = rec_target_channel, purge=purge, ping = ping, was_delete=was_delete)
@@ -916,6 +1034,27 @@ class Celestenet:
                 if time.time() - self.last_status_update > 60:
                     await self.get_status()
 
+                if self.auto_restart_metrics.update():
+                    await self.status_message("INFO", dedent(f"""
+                                                Auto-restarter in effect after {self.auto_restart_metrics.cooldown/3600.0} hours
+                                                at <t:{int(self.auto_restart_metrics.exceeded_cooldown_at)}:R>
+                                                and threshold adjusted to {self.auto_restart_metrics.player_limit_current} players.
+                                                """), False)
+
+                if self.auto_restart_metrics.should_restart(len(self.players)):
+                    await self.status_message("INFO", dedent(f"""
+                                                Auto-restarter metric has exceeded {self.auto_restart_metrics.cooldown/3600.0} hours
+                                                at <t:{int(self.auto_restart_metrics.exceeded_cooldown_at)}:R>
+                                                and dropped below {self.auto_restart_metrics.player_limit_low} + {self.auto_restart_metrics.player_limit_current - self.auto_restart_metrics.player_limit_low} players.
+                                                """), False)
+                    if self.sched_restart:
+                        await self.status_message("WARN", dedent("Skipping auto-restart, because of scheduled restart!"))
+                    else:
+                        await self.schedule_restart(10)
+                    self.auto_restart_metrics.reset()
+
+                await self.schedule_res_update()
+
                 await asyncio.sleep(1)
             except asyncio.CancelledError:
                 print("Process task received CancelledError. Exiting.")
@@ -937,6 +1076,132 @@ class Celestenet:
             self.cookies.pop('celestenet-session', None)
             await self.status_message(f"Key not in reauth: {auth}")
         return auth
+
+    async def cnet_chat_broadcast(self, msg: str, color: str = None):
+        if color:
+            return await self.invoke_wscmd("chatx", {"Color": color, "Text": msg})
+        else:
+            return await self.invoke_wscmd("chat", msg)
+
+    async def do_restart(self, force: bool = False):
+        payload=os.getenv("CNET_RESTART_REQ")
+        try:
+            payload=json.loads(payload)
+        except json.JSONDecodeError:
+            pass
+
+        if not force and not (await self.failsafe_check()):
+            return None
+        ret = requests.post(os.getenv("CNET_RESTART_URI"), data=payload, timeout=180)
+        await self.clear_players()
+        # self.auto_restart_metrics.is_active = False
+        return ret
+
+    async def schedule_restart(self, minutes: int = 1):
+        if self.sched_restart:
+            return f"Invalid: Restart already scheduled for {self.sched_res_init_at + self.sched_res_delay}."
+        
+        self.sched_restart = True
+        self.sched_res_delay = minutes
+        self.sched_res_init_at = time.time()
+        self.sched_last_notif_at = 0
+        self.sched_next_notif_at = time.time()
+    
+    async def failsafe_check(self):
+        if self.restarter_failsafe_tripped:
+            return False
+
+        seconds_since_last_restart = time.time() - self.restarter_last_restart
+        if seconds_since_last_restart > 120:
+            return True
+                
+        self.restarter_failsafe_counter += 1
+        if self.restarter_failsafe_counter > 3:
+            self.restarter_failsafe_tripped = True
+
+        await self.status_message("WARN", f"Restarter failsafe check failed because last restart was at {self.restarter_last_restart}, {seconds_since_last_restart} seconds ago! ({self.restarter_failsafe_tripped=})")
+
+        return False
+
+    def reset_failsafe(self):
+        self.restarter_failsafe_counter = 0
+        self.restarter_failsafe_tripped = False
+
+    async def schedule_res_update(self):
+        if not self.sched_restart:
+            await self.scheduled_restart_cancel()
+            return
+        
+        should_notif = False
+
+        if time.time() >= self.sched_next_notif_at and self.sched_next_notif_at > 0:
+            if self.sched_last_notif_at < self.sched_next_notif_at:
+                self.sched_last_notif_at = self.sched_next_notif_at
+                should_notif = True
+        
+        await self.calc_schedule_next_notif()
+
+        if self.seconds_until_sched_res <= 0:
+            await self.status_message("!restart", f"Scheduled server restart executing... ({self.seconds_until_sched_res} / {self.seconds_since_sched_res})")
+            await self.do_restart()
+            await self.scheduled_restart_cancel()
+            return
+        
+        if should_notif:
+            await self.cnet_chat_broadcast(f"Scheduled server restart in {int(self.seconds_until_sched_res)} seconds...", "FCFF59")
+            await self.status_message("Would !say", f"Scheduled server restart in {self.seconds_until_sched_res} seconds... (sched since {self.seconds_since_sched_res})")
+
+    async def scheduled_restart_cancel(self):
+        self.sched_restart = False
+        self.sched_last_notif_at = 0
+        self.sched_next_notif_at = 0
+        return
+
+    @property
+    def seconds_since_sched_res(self):
+        return time.time() - self.sched_res_init_at
+    
+    @property
+    def seconds_until_sched_res(self):
+        return self.sched_res_delay * 60 - self.seconds_since_sched_res
+
+    async def calc_schedule_next_notif(self):
+        if not self.sched_restart or self.seconds_until_sched_res <= 0:
+            self.sched_last_notif_at = 0
+            self.sched_next_notif_at = 0
+            return
+        
+        if time.time() >= self.sched_next_notif_at and self.sched_next_notif_at > 0:
+            if self.seconds_until_sched_res < 3 * 60:
+                self.sched_next_notif_at = time.time() + 60
+            elif self.seconds_until_sched_res > 8 * 60:
+                self.sched_next_notif_at = time.time() + 5 * 60
+
+    def status_of_restarters(self):
+        return f"""{self.sched_restart=}
+{self.sched_res_init_at=}
+{self.sched_last_notif_at=}
+{self.sched_next_notif_at=}
+{self.seconds_until_sched_res=}
+{self.seconds_since_sched_res=}
+{self.restarter_failsafe_tripped=}
+
+{self.auto_restart_metrics.is_active=}
+{self.auto_restart_metrics.initial_start_delaying=}
+{self.auto_restart_metrics.initial_delay_to_hour=}
+{self.auto_restart_metrics.initial_start_time=}
+{self.auto_restart_metrics.next_possible_restart=}
+{self.auto_restart_metrics.cooldown=}
+{self.auto_restart_metrics.exceeded_cooldown=}
+{self.auto_restart_metrics.exceeded_cooldown_at=}
+{self.auto_restart_metrics.force_at_limit=}
+{self.auto_restart_metrics.player_limit_low=}
+{self.auto_restart_metrics.player_limit_high=}
+{self.auto_restart_metrics.player_limit_current=}
+{self.auto_restart_metrics.limit_step_up_window=}
+{self.auto_restart_metrics.player_limit_step_up=}
+{self.auto_restart_metrics.next_step_up_at=}
+        """
 
     async def socket_relay(self):
         """Async task that
@@ -1083,8 +1348,8 @@ class MessageQueue:
 
         async def send(self):
             if self.channel is None:
-                    print(f"=== Warning ===\n Tried to send {self.content} ({self.embed}) but channel is {self.channel}")
-                    return
+                print(f"=== Warning ===\n Tried to send {self.content} ({self.embed}) but channel is {self.channel}")
+                return
             if self.sent() and self.need_update:
                 if self.channel == self.sent_in:
                     self.msg = await self.msg.edit(content=self.content, embed=self.embed)
@@ -1103,12 +1368,13 @@ class MessageQueue:
 
 
     class Message:
-        def __init__(self, chat, discord):
+        def __init__(self, chat_msg, discord_msg):
             self.recv_time = MessageQueue.timestamp()
-            self.chat: MessageQueue.ChatMsg = chat
-            self.discord: MessageQueue.DiscordMsg = discord
+            self.chat: MessageQueue.ChatMsg = chat_msg
+            self.discord: MessageQueue.DiscordMsg = discord_msg
             self.purged = False
 
+    @staticmethod
     def timestamp():
         return int( time.time_ns() / 1000 )
 
@@ -1123,8 +1389,8 @@ class MessageQueue:
         async with self.lock:
             while len(self.queue) > self.max_len:
                 drop_msg = self.queue.pop()
-                if drop_msg.discord.sent_in is None:
-                    print("popped message before it was sent!")
+                if drop_msg.discord.sent_in is None and not drop_msg.purged:
+                    print(f"popped message before it was sent: {drop_msg.discord.content}")
 
     def get_by_chat_id(self, chat_id: int):
         return next(filter(lambda m: m.chat.chat_id == chat_id, self.queue), None)
